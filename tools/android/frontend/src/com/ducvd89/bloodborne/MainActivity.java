@@ -382,6 +382,11 @@ public final class MainActivity extends Activity {
             rumble.setEnabled(on);
             refreshDrawer();
         });
+        menuItem("ic_gamepad","Test Kishi haptics",null,() -> {
+            if (!rumble.testKishi()) toast(vibrationEnabled()
+                ? "Connect the Kishi V3 Pro in HID mode and allow USB access."
+                : "Turn on Vibration to test the Kishi.");
+        });
         remapItem=menuItem("ic_gamepad","Remap buttons","",() -> { closeDrawer(); new ButtonRemapDialog(this,pad).show(); });
 
         section("Storage");
@@ -740,7 +745,12 @@ public final class MainActivity extends Activity {
         super.onConfigurationChanged(config);
         if (atlas!=null) main.post(() -> { if (!destroyed) atlas.displaysChanged(); });
     }
+    @Override protected void onStart() {
+        super.onStart();
+        rumble.setForeground(true);
+    }
     @Override protected void onStop() {
+        rumble.setForeground(false);
         if (atlas!=null) atlas.stop();
         super.onStop();
     }
@@ -1125,8 +1135,9 @@ public final class MainActivity extends Activity {
                 catch (Exception ex) { error("No folder picker: "+ex); }
             })
             .setNeutralButton("Install from PKG…",(d,w) -> installer.start())
-            .setNegativeButton(change ? "Cancel" : "Quit",(d,w) -> { if (!change) finish(); })
-            .setCancelable(change).show();
+            .setNegativeButton(change ? "Cancel" : "Later",(d,w) -> {
+                if (!change) status.setText("Press Back for the menu to choose a game folder or test the controller.");
+            }).setCancelable(change).show();
     }
     @Override public void onRequestPermissionsResult(int code,String[] permissions,int[] results) {
         super.onRequestPermissionsResult(code,permissions,results);

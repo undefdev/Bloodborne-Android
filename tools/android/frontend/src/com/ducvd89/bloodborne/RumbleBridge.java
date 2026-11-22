@@ -21,13 +21,20 @@ final class RumbleBridge {
     private static final int ON_THRESHOLD=64; // without amplitude control: on at or above this
     private final Context context;
     private final File file;
+    private final KishiHaptics kishi;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final List<Vibrator> active = new ArrayList<>();
     private FileObserver observer;
     private boolean enabled=true, drawer, paused;
     private int large, small;
+    private boolean testing;
+    private final Runnable endTest = this::stopTest;
 
-    RumbleBridge(Context context, File file) { this.context=context; this.file=file; }
+    RumbleBridge(Context context, File file) {
+        this.context=context;
+        this.file=file;
+        kishi=new KishiHaptics(context,() -> { if (enabled && !drawer && !paused) apply(); });
+    }
 
     /** Starts watching; the file is not read (an old value must not replay). Main thread. */
     void start() {
@@ -39,18 +46,55 @@ final class RumbleBridge {
             @Override public void onEvent(int event, String path) { if (name.equals(path)) handler.post(RumbleBridge.this::read); }
         };
         observer.startWatching();
+        kishi.start();
     }
-    void close() { if (observer!=null) { observer.stopWatching(); observer=null; } reset(); }
+    void close() {
+        if (observer!=null) { observer.stopWatching(); observer=null; }
+        enabled=false;
+        reset();
+        kishi.close();
+    }
+    void setForeground(boolean foreground) {
+        if (!foreground) stopTest();
+        kishi.setForeground(foreground);
+    }
+
+    boolean testKishi() {
+        if (!enabled || !drawer || !kishi.play(170,170)) return false;
+        testing=true;
+        handler.removeCallbacks(endTest);
+        handler.postDelayed(endTest,220);
+        return true;
+    }
+
+    private void stopTest() {
+        if (!testing) return;
+        handler.removeCallbacks(endTest);
+        testing=false;
+        kishi.play(0,0);
+    }
+
     /** The setting: off silences it at once; on picks up what the game has set. */
-    void setEnabled(boolean on) { enabled=on; if (on) read(); else silence(); }
+    void setEnabled(boolean on) {
+        enabled=on;
+        if (!on) silence();
+        kishi.setEnabled(on);
+        if (on && observer!=null) read();
+    }
     /** The drawer is open or the game is held: nothing vibrates then. The file always holds the game's current
      *  motors (the runtime writes only changes), so it is read again when that ends. Any thread. */
-    void setDrawer(boolean open) { handler.post(() -> { drawer=open; if (open) silence(); else read(); }); }
+    void setDrawer(boolean open) { handler.post(() -> { drawer=open; if (open) silence(); else { stopTest(); read(); } }); }
     void setPaused(boolean hold) { handler.post(() -> { if (paused==hold) return; paused=hold; if (hold) silence(); else read(); }); }
     /** The game ended or restarts: also the file goes, so the next game does not replay it. */
     void reset() { file.delete(); silence(); }
     private void silence() {
+        stopTest();
         large=small=0;
+        kishi.play(0,0);
+        cancelAndroidVibration();
+    }
+
+    private void cancelAndroidVibration() {
         for (Vibrator v:active) v.cancel();
         active.clear();
     }
@@ -69,6 +113,10 @@ final class RumbleBridge {
 
     /** The pad's vibrators (two: large, small; one: the stronger), else the device's own at the stronger. */
     private void apply() {
+        if (kishi.play(large,small) || (large==0 && small==0)) {
+            cancelAndroidVibration();
+            return;
+        }
         List<Vibrator> targets=new ArrayList<>(); int[] amps;
         List<Vibrator> pad=padVibrators();
         if (pad.size()>=2) { targets.add(pad.get(0)); targets.add(pad.get(1)); amps=new int[]{large,small}; }
