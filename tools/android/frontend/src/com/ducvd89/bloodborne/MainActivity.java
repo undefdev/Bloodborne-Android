@@ -2006,6 +2006,7 @@ public final class MainActivity extends Activity {
             File gameLog=new File(BASE,"logs/android-game.log"), previous=new File(BASE,"logs/android-game.prev.log");
             gameLog.getParentFile().mkdirs();
             if (gameLog.length()>0) { previous.delete(); gameLog.renameTo(previous); }
+            rumble.setGame(gameDir==null ? null : new File(gameDir));
             final Process launched=launchScript(extra.toArray(new String[0]));
             game=launched;
             synchronized (pauseLock) { gamePid=pidOf(launched); onlineGame=online.launchedOnline(); }

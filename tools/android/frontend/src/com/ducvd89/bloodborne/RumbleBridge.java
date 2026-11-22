@@ -60,6 +60,8 @@ final class RumbleBridge {
         reset();
         kishi.close();
     }
+    /** The game folder's footstep tracks, if it has them (FootstepTracks). Any thread. */
+    void setGame(File gameDir) { kishi.setTracks(gameDir==null ? null : FootstepTracks.load(gameDir)); }
     void setForeground(boolean foreground) {
         if (!foreground) stopTest();
         kishi.setForeground(foreground);

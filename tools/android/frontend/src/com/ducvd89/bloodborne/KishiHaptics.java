@@ -22,14 +22,15 @@ import java.util.Objects;
 
 final class KishiHaptics {
     private static final String TAG = "BloodborneKishi";
-    private static final int FRAME_MS = 30;
-    // Pairs of amplitude and frequency, one pair per frame.
-    private static final int[] STONE = {82, 35};
-    private static final int[] WOOD = {65, 10, 24, 14};
-    private static final int[] GRAVEL = {60, 41, 32, 27};
-    private static final int[] SOFT = {46, 11};
-    private static final int[] WATER = {57, 28, 0, 0, 37, 41};
-    private static final int[] METAL = {70, 45, 28, 37};
+    private static final int FRAME_MS = 30, SLOTS = 4; // a frame plays four (amplitude, frequency) slots per grip
+    private static final int HEEL_FREQ = 10, HEEL_SLOTS = 8, HEEL_PERCENT = 40;
+    // Without the game folder's tracks: (amplitude 0-63, frequency) per 7.5 ms slot.
+    private static final int[] STONE = slots(20, 35);
+    private static final int[] WOOD = slots(16, 10, 6, 14);
+    private static final int[] GRAVEL = slots(15, 41, 8, 27);
+    private static final int[] SOFT = slots(11, 11);
+    private static final int[] WATER = slots(14, 28, 0, 0, 9, 41);
+    private static final int[] METAL = slots(17, 45, 7, 37);
     private final Context context;
     private final UsbManager usb;
     private final Runnable routeChanged;
@@ -42,6 +43,7 @@ final class KishiHaptics {
     private UsbDevice attached, device;
     private boolean requested, attempted, ready, foreground, enabled = true;
     private int wantedLarge, wantedSmall;
+    private volatile FootstepTracks tracks;
     private final BroadcastReceiver events = new BroadcastReceiver() {
         @Override public void onReceive(Context ignored, Intent intent) { refresh(); }
     };
@@ -54,7 +56,8 @@ final class KishiHaptics {
     private int large, small, missedReplies;
     private boolean playing;
     private int[] footstep;
-    private int footstepIndex, footstepScale;
+    private int footstepSlot, footstepScale;
+    private boolean leftFoot;
     private final byte[] reply = new byte[64];
     private final Runnable tick = this::sendFrame;
 
@@ -146,15 +149,20 @@ final class KishiHaptics {
         return true;
     }
 
+    /** The game folder's footstep tracks (null: the built-in patterns). */
+    void setTracks(FootstepTracks tracks) { this.tracks = tracks; }
+
     void step(int material, boolean running) {
         if (!ready || wantedLarge != 0 || wantedSmall != 0) return;
-        int[] pattern = surfacePattern(material);
+        FootstepTracks sounds = tracks;
+        int[] pattern = sounds != null ? sounds.pick(material, running) : surfacePattern(material);
         if (pattern == null) return;
         worker.post(() -> {
             if (connection == null || large != 0 || small != 0) return;
             footstep = pattern;
-            footstepIndex = 0;
-            footstepScale = running ? 100 : 75;
+            footstepSlot = 0;
+            footstepScale = running ? 100 : 80;
+            leftFoot = !leftFoot;
             worker.removeCallbacks(tick);
             sendFrame();
         });
@@ -223,10 +231,19 @@ final class KishiHaptics {
         long start = SystemClock.uptimeMillis();
         byte[] frame;
         if (footstep != null) {
-            int amplitude = footstep[footstepIndex++] * footstepScale / 100;
-            int frequency = footstep[footstepIndex++];
-            frame = frame(amplitude, amplitude * 3 / 4, frequency, frequency);
-            if (footstepIndex == footstep.length) footstep = null;
+            // The stepping foot's grip plays the track; the other one only the heel strike, low and weaker.
+            int[] step = new int[SLOTS * 2], heel = new int[SLOTS * 2];
+            for (int i = 0; i < SLOTS; i++, footstepSlot++) {
+                if (footstepSlot * 2 >= footstep.length) break;
+                step[i * 2] = footstep[footstepSlot * 2] * footstepScale / 100;
+                step[i * 2 + 1] = footstep[footstepSlot * 2 + 1];
+                if (footstepSlot < HEEL_SLOTS) {
+                    heel[i * 2] = step[i * 2] * HEEL_PERCENT / 100;
+                    heel[i * 2 + 1] = HEEL_FREQ;
+                }
+            }
+            frame = leftFoot ? frame(step, heel) : frame(heel, step);
+            if (footstepSlot * 2 >= footstep.length) footstep = null;
         } else {
             frame = frame(large, small);
         }
@@ -274,25 +291,36 @@ final class KishiHaptics {
         thread.quitSafely();
     }
 
-    // Protocol 2.5 stream report, based on Mokomis/rumblebridge (MIT).
-    static byte[] frame(int large, int small) {
-        return frame(large, small, 10, 35);
+    /** (amplitude, frequency) per frame -> the same per slot. */
+    private static int[] slots(int... perFrame) {
+        int[] out = new int[perFrame.length * SLOTS];
+        for (int i = 0; i < out.length; i += 2) {
+            out[i] = perFrame[i / (SLOTS * 2) * 2];
+            out[i + 1] = perFrame[i / (SLOTS * 2) * 2 + 1];
+        }
+        return out;
     }
 
-    private static byte[] frame(int large, int small, int leftFrequency, int rightFrequency) {
+    // Protocol 2.5 stream report, based on Mokomis/rumblebridge (MIT).
+    static byte[] frame(int large, int small) {
+        return frame(slots(large * 63 / 255, 10), slots(small * 63 / 255, 35));
+    }
+
+    /** Left and right grips: SLOTS (amplitude 0-63, frequency 0-127) pairs each. */
+    static byte[] frame(int[] left, int[] right) {
         byte[] report = {2, 19, 0, 1, 0x0e, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
         putBits(report, 40, FRAME_MS, 7);
-        band(report, 47, large, leftFrequency);
-        band(report, 102, small, rightFrequency);
+        band(report, 47, left);
+        band(report, 102, right);
         return report;
     }
 
-    private static void band(byte[] report, int bit, int amplitude, int frequency) {
+    private static void band(byte[] report, int bit, int[] slots) {
         putBits(report, bit++, 1, 1);
-        int level = amplitude * 63 / 255;
-        for (int i = 0; i < 4; i++, bit += 13) {
+        for (int i = 0; i < SLOTS; i++, bit += 13) {
+            int level = slots[i * 2];
             putBits(report, bit, level, 6);
-            putBits(report, bit + 6, level == 0 ? 0 : frequency, 7);
+            putBits(report, bit + 6, level == 0 ? 0 : slots[i * 2 + 1], 7);
         }
     }
 
