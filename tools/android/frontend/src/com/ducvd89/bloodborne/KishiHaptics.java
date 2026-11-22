@@ -23,6 +23,13 @@ import java.util.Objects;
 final class KishiHaptics {
     private static final String TAG = "BloodborneKishi";
     private static final int FRAME_MS = 30;
+    // Pairs of amplitude and frequency, one pair per frame.
+    private static final int[] STONE = {82, 35};
+    private static final int[] WOOD = {65, 10, 24, 14};
+    private static final int[] GRAVEL = {60, 41, 32, 27};
+    private static final int[] SOFT = {46, 11};
+    private static final int[] WATER = {57, 28, 0, 0, 37, 41};
+    private static final int[] METAL = {70, 45, 28, 37};
     private final Context context;
     private final UsbManager usb;
     private final Runnable routeChanged;
@@ -46,6 +53,8 @@ final class KishiHaptics {
     private UsbEndpoint out, in;
     private int large, small, missedReplies;
     private boolean playing;
+    private int[] footstep;
+    private int footstepIndex, footstepScale;
     private final byte[] reply = new byte[64];
     private final Runnable tick = this::sendFrame;
 
@@ -129,11 +138,49 @@ final class KishiHaptics {
             worker.post(() -> {
                 large = l;
                 small = s;
+                footstep = null;
                 worker.removeCallbacks(tick);
                 sendFrame();
             });
         }
         return true;
+    }
+
+    void step(int material, boolean running) {
+        if (!ready || wantedLarge != 0 || wantedSmall != 0) return;
+        int[] pattern = surfacePattern(material);
+        if (pattern == null) return;
+        worker.post(() -> {
+            if (connection == null || large != 0 || small != 0) return;
+            footstep = pattern;
+            footstepIndex = 0;
+            footstepScale = running ? 100 : 75;
+            worker.removeCallbacks(tick);
+            sendFrame();
+        });
+    }
+
+    void cancelStep() {
+        if (!ready) return;
+        worker.post(() -> {
+            if (footstep == null) return;
+            footstep = null;
+            worker.removeCallbacks(tick);
+            sendFrame();
+        });
+    }
+
+    private static int[] surfacePattern(int material) {
+        switch (material) {
+            case 1: case 2: case 14: case 15: case 16: case 32: return STONE;
+            case 4: case 30: case 38: return WOOD;
+            case 6: case 13: return GRAVEL;
+            case 3: case 5: case 7: case 8: case 10: case 12: case 17: case 24: case 28: return SOFT;
+            case 18: case 19: case 20: case 21: case 23: case 25: case 31:
+            case 33: case 35: case 36: case 37: case 39: return WATER;
+            case 9: return METAL;
+            default: return null;
+        }
     }
 
     private void connect(UsbDevice target) {
@@ -171,10 +218,18 @@ final class KishiHaptics {
     }
 
     private void sendFrame() {
-        boolean active = large != 0 || small != 0;
+        boolean active = large != 0 || small != 0 || footstep != null;
         if (connection == null || (!active && !playing)) return;
         long start = SystemClock.uptimeMillis();
-        byte[] frame = frame(large, small);
+        byte[] frame;
+        if (footstep != null) {
+            int amplitude = footstep[footstepIndex++] * footstepScale / 100;
+            int frequency = footstep[footstepIndex++];
+            frame = frame(amplitude, amplitude * 3 / 4, frequency, frequency);
+            if (footstepIndex == footstep.length) footstep = null;
+        } else {
+            frame = frame(large, small);
+        }
         // usbfs also accepts interrupt endpoints for these bounded transfers.
         int sent = connection.bulkTransfer(out, frame, frame.length, 40);
         boolean answered = sent == frame.length && connection.bulkTransfer(in, reply, reply.length, 25) > 0;
@@ -206,6 +261,7 @@ final class KishiHaptics {
         connectedDevice = null;
         port = null;
         playing = false;
+        footstep = null;
         large = small = missedReplies = 0;
     }
 
@@ -220,10 +276,14 @@ final class KishiHaptics {
 
     // Protocol 2.5 stream report, based on Mokomis/rumblebridge (MIT).
     static byte[] frame(int large, int small) {
+        return frame(large, small, 10, 35);
+    }
+
+    private static byte[] frame(int large, int small, int leftFrequency, int rightFrequency) {
         byte[] report = {2, 19, 0, 1, 0x0e, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
         putBits(report, 40, FRAME_MS, 7);
-        band(report, 47, large, 10);
-        band(report, 102, small, 35);
+        band(report, 47, large, leftFrequency);
+        band(report, 102, small, rightFrequency);
         return report;
     }
 

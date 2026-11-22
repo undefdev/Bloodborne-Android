@@ -81,6 +81,7 @@ if [[ ${BB_SKIP_RECOMP:-} != 1 ]]; then
     recomp=$PWD/.local-deps/android/recomp/android
     cp "$recomp/libbbrecomp.so" "$out/lib/arm64-v8a/"
     mkdir -p "$out/assets/recomp" && cp -r "$recomp/bundle" "$recomp/variants" "$recomp/VERSION" "$out/assets/recomp/"
+    python3 tools/android/add_footstep_catalog.py "$out/assets/recomp"
     [[ -d $recomp/manifest ]] && cp -r "$recomp/manifest" "$out/assets/recomp/" # optional: the PC-made shard manifest
     # The PC-made shard manifest (bb-recomp --manifest-out; hashes and keys only, no game bytes) of Bloodborne 1.09 (CUSA03173), bundled as manifest/<name>.json
     # (RecompAssets picks the first *.json): tools/android/recomp-manifest/CUSA03173-01.09.json, written by the release tool. BB_RECOMP_MANIFEST=<file> bundles another one.

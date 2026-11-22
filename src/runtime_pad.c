@@ -723,6 +723,45 @@ static ABI int32_t pad_info(int32_t handle, ControllerInfo *info) {
     pthread_mutex_unlock(&lock);
     return 0;
 }
+#ifdef __ANDROID__
+#define FOOTSTEP_SITE 0x01a26500
+#define WORLD_CHR_MAN 0x0553e878
+static const char *footstep_path;
+static pthread_mutex_t footstep_lock=PTHREAD_MUTEX_INITIALIZER;
+
+static uint32_t footstep(void *context, GuestRegsEx *regs) {
+    const unsigned sound=(uint32_t)regs->gpr[GUEST_RBX];
+    if (sound!=1001 && sound!=2001) return GUEST_HOOK_CONTINUE;
+    const unsigned char *world=*(const unsigned char *const *)context;
+    if (!world || *(const uintptr_t *)(world+0x60)!=regs->gpr[GUEST_RAX]) return GUEST_HOOK_CONTINUE;
+    const unsigned char *physics=(const unsigned char *)(uintptr_t)regs->gpr[GUEST_RSI];
+    unsigned material=physics[0x10];
+    struct timespec now;
+    if (clock_gettime(CLOCK_BOOTTIME,&now)!=0) return GUEST_HOOK_CONTINUE;
+    unsigned long long ms=(unsigned long long)now.tv_sec*1000+now.tv_nsec/1000000;
+    char tmp[512];
+    if (snprintf(tmp,sizeof(tmp),"%s.tmp",footstep_path)>=(int)sizeof(tmp)) return GUEST_HOOK_CONTINUE;
+    pthread_mutex_lock(&footstep_lock);
+    FILE *out=fopen(tmp,"w");
+    if (out) {
+        fprintf(out,"%llu %u %u\n",ms,material,sound);
+        if (fclose(out)==0) rename(tmp,footstep_path);
+    }
+    pthread_mutex_unlock(&footstep_lock);
+    return GUEST_HOOK_CONTINUE;
+}
+
+void runtime_pad_install_footsteps(unsigned char *image, size_t size) {
+    /* CUSA03173 v1.09, TAE 128, category 8: rax=character, ebx=base sound, rsi=physics. */
+    static const unsigned char instruction[]={0x0f,0xb6,0x56,0x10,0x48,0x63,0xf3};
+    footstep_path=getenv("BB_FOOTSTEP_FILE");
+    if (!footstep_path || size<WORLD_CHR_MAN+sizeof(uintptr_t) ||
+        memcmp(image+FOOTSTEP_SITE,instruction,sizeof(instruction))) return;
+    if (guest_cpu_hook_slot((uintptr_t)(image+FOOTSTEP_SITE),4,footstep,image+WORLD_CHR_MAN))
+        puts("Runtime: hunter footstep haptics hook installed");
+}
+#endif
+
 static ABI int32_t pad_vibration(int32_t handle, const uint8_t *param) {
     if (handle!=PAD_HANDLE || !opened) return ERR_INVALID_HANDLE;
     if (!param) return ERR_INVALID_ARG;

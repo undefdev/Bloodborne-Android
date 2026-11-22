@@ -5,6 +5,7 @@ import android.os.Build;
 import android.os.FileObserver;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.os.VibratorManager;
@@ -20,19 +21,21 @@ import java.util.List;
 final class RumbleBridge {
     private static final int ON_THRESHOLD=64; // without amplitude control: on at or above this
     private final Context context;
-    private final File file;
+    private final File file, footsteps;
     private final KishiHaptics kishi;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final List<Vibrator> active = new ArrayList<>();
     private FileObserver observer;
     private boolean enabled=true, drawer, paused;
     private int large, small;
+    private long lastFootstep;
     private boolean testing;
     private final Runnable endTest = this::stopTest;
 
     RumbleBridge(Context context, File file) {
         this.context=context;
         this.file=file;
+        footsteps=new File(file.getParentFile(),"android-footstep.state");
         kishi=new KishiHaptics(context,() -> { if (enabled && !drawer && !paused) apply(); });
     }
 
@@ -40,10 +43,13 @@ final class RumbleBridge {
     void start() {
         File dir=file.getParentFile();
         if (observer!=null || dir==null) return;
-        dir.mkdirs(); file.delete();
+        dir.mkdirs(); file.delete(); footsteps.delete();
         final String name=file.getName();
         observer=new FileObserver(dir.getPath(),FileObserver.MOVED_TO|FileObserver.CLOSE_WRITE) {
-            @Override public void onEvent(int event, String path) { if (name.equals(path)) handler.post(RumbleBridge.this::read); }
+            @Override public void onEvent(int event, String path) {
+                if (name.equals(path)) handler.post(RumbleBridge.this::read);
+                else if (footsteps.getName().equals(path)) handler.post(RumbleBridge.this::readFootstep);
+            }
         };
         observer.startWatching();
         kishi.start();
@@ -86,10 +92,11 @@ final class RumbleBridge {
     void setDrawer(boolean open) { handler.post(() -> { drawer=open; if (open) silence(); else { stopTest(); read(); } }); }
     void setPaused(boolean hold) { handler.post(() -> { if (paused==hold) return; paused=hold; if (hold) silence(); else read(); }); }
     /** The game ended or restarts: also the file goes, so the next game does not replay it. */
-    void reset() { file.delete(); silence(); }
+    void reset() { file.delete(); footsteps.delete(); silence(); }
     private void silence() {
         stopTest();
         large=small=0;
+        kishi.cancelStep();
         kishi.play(0,0);
         cancelAndroidVibration();
     }
@@ -109,6 +116,23 @@ final class RumbleBridge {
         if (l==large && s==small) return;
         large=l; small=s;
         apply();
+    }
+
+    private void readFootstep() {
+        if (!enabled || drawer || paused) return;
+        try (BufferedReader in=new BufferedReader(new FileReader(footsteps))) {
+            String line=in.readLine();
+            if (line==null) return;
+            String[] parts=line.split(" ");
+            if (parts.length!=3) return;
+            long timestamp=Long.parseLong(parts[0]);
+            long age=SystemClock.elapsedRealtime()-timestamp;
+            if (timestamp<=lastFootstep || age<0 || age>120) return;
+            lastFootstep=timestamp;
+            kishi.step(Integer.parseInt(parts[1]),"2001".equals(parts[2]));
+        } catch (java.io.IOException | NumberFormatException e) {
+            // A reset may delete a pending event.
+        }
     }
 
     /** The pad's vibrators (two: large, small; one: the stronger), else the device's own at the stronger. */

@@ -743,6 +743,9 @@ int main(int argc, char **argv) {
     if (argc == 2 && !strcmp(argv[1], "--vulkan-only")) return vulkan_smoke();
     check_cpu();
     int cpu_only = 0, strict_imports = 0;
+#ifdef __ANDROID__
+    int supports_footsteps=0;
+#endif
     unsigned timeout_seconds = 10;
     const char *content_profile=NULL, *app0=NULL, *user_dir=NULL;
     /* --patches may repeat (the Thor's settings choose pre-compiled parts): applied in order. */
@@ -795,6 +798,9 @@ int main(int argc, char **argv) {
         sfo_value(sfo,"TITLE",title,sizeof(title),NULL);
         sfo_value(sfo,"APP_VER",version,sizeof(version),NULL);
         runtime_net_configure(app0,serial,title,version);
+#ifdef __ANDROID__
+        supports_footsteps=!strcmp(serial,"CUSA03173") && !strcmp(version,"01.09");
+#endif
     }
     bbgpu_register_kernel();
 #ifdef _WIN32
@@ -975,6 +981,9 @@ int main(int argc, char **argv) {
             for (int i=0;i<fallback_count;++i) apply_patches(fallback_files[i], segments, ns, relocs, nr);
         }
     }
+#ifdef __ANDROID__
+    if (supports_footsteps && !cpu_only) runtime_pad_install_footsteps(image,size);
+#endif
     protect(traps, round_page((import_count + 1) * 32), 5);
     protect(image, round_page(size), 0);
     int executable_entry = 0;
