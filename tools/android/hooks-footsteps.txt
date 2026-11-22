@@ -1,2 +1,2 @@
 # CUSA03173 v1.09: TAE 128 floor-material sound, before reading the material.
-hook 1a26500 4 snap resume=1a26504
+hook 1a26500 4 snap

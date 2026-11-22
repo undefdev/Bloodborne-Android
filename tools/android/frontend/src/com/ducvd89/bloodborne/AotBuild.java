@@ -87,6 +87,10 @@ final class AotBuild {
         return libraryCatalogHash == null || !libraryCatalogHash.trim().equalsIgnoreCase(bundled.trim());
     }
 
+    static boolean generalUpdateAvailable(String libraryHash, String bundled, String upstream) {
+        return outdated(libraryHash, bundled) && (upstream == null || outdated(libraryHash, upstream));
+    }
+
     // ---------------------------------------------------------------- the tool's lines
 
     /** `BBR-PROGRESS <stage> <done> <total>`. */

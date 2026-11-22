@@ -522,7 +522,7 @@ public final class MainActivity extends Activity {
         setDetail(onlineItem,onlineDetail());
         {
             NativeCpu.State ns=nativeCpu.quickState();
-            boolean upd=ns.ready() && !ns.manualOverride && NativeCpu.outdated(ns.info,RecompAssets.catalogHash(this));
+            boolean upd=ns.ready() && !ns.manualOverride && RecompAssets.generalUpdateAvailable(this,ns.info,RecompAssets.catalogHash(this));
             setDetail(nativeCpuItem,NativeCpu.summary(ns)+(upd ? " · update available" : ""));
         }
         mods.summary(text -> setDetail(modsItem,text));
@@ -1959,7 +1959,7 @@ public final class MainActivity extends Activity {
         warnDevice();
         // A library that works but was built with older catalogs: a non-blocking offer, once per run, not again after "Later" for the same catalogs.
         final String bundledCatalog=RecompAssets.catalogHash(this);
-        final boolean offerUpdate=!nativeUpdateOffered && !native_.manualOverride && native_.info!=null && NativeCpu.outdated(native_.info.catalogHash,bundledCatalog)
+        final boolean offerUpdate=!nativeUpdateOffered && !native_.manualOverride && RecompAssets.generalUpdateAvailable(this,native_.info,bundledCatalog)
             && !bundledCatalog.equals(getSharedPreferences("bloodborne",MODE_PRIVATE).getString(RebuildDialog.LATER_KEY,null));
         final boolean offerQuick=offerUpdate && AotBuild.keptShards(new File(BASE))>0;
         if (offerUpdate) nativeUpdateOffered=true;

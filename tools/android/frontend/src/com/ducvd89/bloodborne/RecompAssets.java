@@ -39,6 +39,18 @@ final class RecompAssets {
             return t.matches("[0-9A-Fa-f]+") ? t.toLowerCase(java.util.Locale.ROOT) : null;
         } catch (IOException e) { return null; }
     }
+    static boolean generalUpdateAvailable(Context c, NativeCpu.Info info, String bundled) {
+        if (info == null) return false;
+        String upstream = null;
+        String version = versionText(c);
+        if (version != null) {
+            for (String line : version.split("\n")) {
+                if (line.matches("upstream_catalog [0-9a-f]{16}")) upstream = line.substring("upstream_catalog ".length());
+            }
+        }
+        return AotBuild.generalUpdateAvailable(info.catalogHash, bundled, upstream);
+    }
+
     /** The optional shard manifest the APK carries (recomp/manifest/*.json, made on a PC), copied out next to bundle/: its path, or null. */
     static File manifest(File recompRoot) {
         File[] f = new File(recompRoot, "manifest").listFiles((d, n) -> n.endsWith(".json"));

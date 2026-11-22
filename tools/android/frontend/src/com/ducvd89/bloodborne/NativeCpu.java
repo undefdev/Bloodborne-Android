@@ -421,11 +421,6 @@ final class NativeCpu {
 
     static String megabytes(long bytes) { return String.format(Locale.ROOT, "%.0f MB", bytes / 1048576.0); }
 
-    /** The library works but its hook/variant catalogs are not the ones this app ships (libbbaot.json has another catalog_hash, or none: an older tool):
-     *  the newest fixes are inactive. `bundled` is variants/CATALOG_HASH of the APK (null: none, never outdated). */
-    static boolean outdated(Info info, String bundled) { return info != null && AotBuild.outdated(info.catalogHash, bundled); }
-    static boolean outdated(String libraryCatalogHash, String bundled) { return AotBuild.outdated(libraryCatalogHash, bundled); }
-
     /** The drawer row's second line (no hashing: the cached image hash only). */
     static String summary(State s) {
         if (s.manualOverride) return "Set by bionic-local.sh";

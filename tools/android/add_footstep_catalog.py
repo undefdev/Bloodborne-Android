@@ -7,17 +7,27 @@ from pathlib import Path
 root = Path(sys.argv[1])
 variants = root / "variants"
 hook = Path(__file__).with_name("hooks-footsteps.txt")
-shutil.copyfile(hook, variants / hook.name)
+def catalog_hash(paths):
+    # Match catalogHash() in the Rebuild Tool, including the filenames.
+    value = 0xcbf29ce484222325
+    for path in sorted(paths):
+        for byte in path.name.encode() + b"\0" + path.read_bytes() + b"\0":
+            value = ((value ^ byte) * 1099511628211) & 0xffffffffffffffff
+    return f"{value:016x}"
 
-# Match catalogHash() in the Rebuild Tool, including the filenames.
-value = 0xcbf29ce484222325
-for path in sorted(variants.glob("*.txt")):
-    for byte in path.name.encode() + b"\0" + path.read_bytes() + b"\0":
-        value = ((value ^ byte) * 1099511628211) & 0xffffffffffffffff
-hash_text = f"{value:016x}"
-(variants / "CATALOG_HASH").write_text(hash_text + "\n")
 
 version = root / "VERSION"
-lines = [line for line in version.read_text().splitlines() if not line.startswith("port_catalog ")]
-lines.append("port_catalog " + hash_text)
+lines = version.read_text().splitlines()
+hash_file = variants / "CATALOG_HASH"
+expected = next((line.split()[1] for line in lines if line.startswith("upstream_catalog ")),
+                hash_file.read_text().strip())
+upstream = catalog_hash(path for path in variants.glob("*.txt") if path.name != hook.name)
+if upstream != expected:
+    sys.exit(f"Unmodified Rebuild Tool catalog hash is {upstream}, package says {expected}")
+
+shutil.copyfile(hook, variants / hook.name)
+bundled = catalog_hash(variants.glob("*.txt"))
+hash_file.write_text(bundled + "\n")
+lines = [line for line in lines if not line.startswith(("upstream_catalog ", "port_catalog "))]
+lines.extend(("upstream_catalog " + upstream, "port_catalog " + bundled))
 version.write_text("\n".join(lines) + "\n")

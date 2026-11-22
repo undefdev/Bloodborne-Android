@@ -22,6 +22,10 @@ public final class AotBuildTest {
         check(String.join(" ", AotBuild.command("/r", "/b", "/g", "/bu", "/v", "/w", 2, true, "/m.json")).endsWith("--resume --manifest /m.json"), "kept work files: no --clean-work, manifest passed");
         check(AotBuild.keepWork(3L << 30, false) && !AotBuild.keepWork(2L << 30, false) && AotBuild.keepWork(2L << 30, true), "keep the work files only with room to spare");
         check(AotBuild.outdated(null, "ab12") && AotBuild.outdated("cd", "ab12") && !AotBuild.outdated("AB12", "ab12") && !AotBuild.outdated(null, null), "outdated library detection");
+        check(!AotBuild.generalUpdateAvailable("ab12", "cd34", "AB12"), "optional hook does not prompt a rebuild");
+        check(!AotBuild.generalUpdateAvailable("cd34", "cd34", "ab12"), "library with optional hook is current");
+        check(AotBuild.generalUpdateAvailable("ef56", "cd34", "ab12"), "older upstream library still gets the update");
+        check(AotBuild.generalUpdateAvailable(null, "cd34", null), "missing catalog metadata retains the original update behavior");
         int[] ru = AotBuild.parseReused("bb-recomp: Reused 58 of 64 shards (6 to build)");
         check(ru != null && ru[0] == 58 && ru[1] == 64 && AotBuild.parseReused("compile done") == null, "reused shards line");
         AotBuild.Tracker rt = new AotBuild.Tracker(); rt.feed("reused 60 of 64 shards"); rt.feed("BBR-PROGRESS compile 2 4");

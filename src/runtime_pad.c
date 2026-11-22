@@ -757,7 +757,8 @@ void runtime_pad_install_footsteps(unsigned char *image, size_t size) {
     footstep_path=getenv("BB_FOOTSTEP_FILE");
     if (!footstep_path || size<WORLD_CHR_MAN+sizeof(uintptr_t) ||
         memcmp(image+FOOTSTEP_SITE,instruction,sizeof(instruction))) return;
-    if (guest_cpu_hook_slot((uintptr_t)(image+FOOTSTEP_SITE),4,footstep,image+WORLD_CHR_MAN))
+    uintptr_t site=(uintptr_t)(image+FOOTSTEP_SITE);
+    if (guest_cpu_has_hook_slot(site) && guest_cpu_hook_slot(site,4,footstep,image+WORLD_CHR_MAN))
         puts("Runtime: hunter footstep haptics hook installed");
 }
 #endif

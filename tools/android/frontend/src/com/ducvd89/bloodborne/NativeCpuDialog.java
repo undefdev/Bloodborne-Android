@@ -146,7 +146,7 @@ final class NativeCpuDialog {
             String hash = NativeCpu.deviceImageHash(host.base(), true);
             NativeCpu.State s = NativeCpu.state(host.base(), hash, id[0], id[1]);
             boolean upd = s.installed && s.info != null && s.problem == null && !s.manualOverride && s.match != NativeCpu.Match.MISMATCH
-                && NativeCpu.outdated(s.info, RecompAssets.catalogHash(activity));
+                && RecompAssets.generalUpdateAvailable(activity, s.info, RecompAssets.catalogHash(activity));
             boolean quick = AotBuild.keptShards(host.base()) > 0;
             long bytes = AotBuild.treeSize(AotBuild.workRoot(host.base()));
             main.post(() -> { if (!closed) { updateAvailable = upd; quickUpdate = quick; buildFilesBytes = bytes; render(s); } });
