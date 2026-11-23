@@ -766,27 +766,32 @@ void runtime_pad_install_footsteps(unsigned char *image, size_t size) {
 static ABI int32_t pad_vibration(int32_t handle, const uint8_t *param) {
     if (handle!=PAD_HANDLE || !opened) return ERR_INVALID_HANDLE;
     if (!param) return ERR_INVALID_ARG;
+    int from_r4=0; /* hook R4 (runtime_events.c) drives the Android rumble file */
 #ifdef __ANDROID__
-    runtime_events_vibration(param[0],param[1]);
+    from_r4=runtime_events_vibration(param[0],param[1]);
 #endif
 #ifndef BB_NO_SDL
+    (void)from_r4;
     pthread_mutex_lock(&lock);
     SDL_Gamepad *g=current_gamepad();
     if (g) SDL_RumbleGamepad(g,(uint16_t)(param[0]*257),(uint16_t)(param[1]*257),1000);
     pthread_mutex_unlock(&lock);
 #else
     /* Android: BB_RUMBLE_FILE gets "<large> <small>\n" (0-255) whenever the motors change, written
-     * atomically (tmp + rename); the app turns it into vibration. Games may call this every frame. */
+     * atomically (tmp + rename); the app turns it into vibration. Games may call this every frame.
+     * Bloodborne sends the light motor as an on/off PWM bit, not a strength, so a non-zero small is 255 here.
+     * With hook R4 installed, runtime_events.c writes the file from the game's motor values instead. */
     static int last_large=-1, last_small=-1;
     static const char *path; static int checked;
     if (!checked) { path=getenv("BB_RUMBLE_FILE"); checked=1; }
+    const int large=param[0], small=param[1] ? 255 : 0;
     pthread_mutex_lock(&lock);
-    if (path && (param[0]!=last_large || param[1]!=last_small)) {
+    if (path && !from_r4 && (large!=last_large || small!=last_small)) {
         char tmp[512]; snprintf(tmp,sizeof(tmp),"%s.tmp",path);
         FILE *f=fopen(tmp,"w");
         if (f) {
-            fprintf(f,"%u %u\n",param[0],param[1]);
-            if (fclose(f)==0 && rename(tmp,path)==0) { last_large=param[0]; last_small=param[1]; }
+            fprintf(f,"%d %d\n",large,small);
+            if (fclose(f)==0 && rename(tmp,path)==0) { last_large=large; last_small=small; }
         }
     }
     pthread_mutex_unlock(&lock);

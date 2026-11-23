@@ -2038,7 +2038,7 @@ public final class MainActivity extends Activity {
                     String stopLine=null;
                     String line; while ((line=r.readLine())!=null) {
                         out.println(OnlineSettings.scrub(line)); out.flush();
-                        if (line.startsWith("Runtime: event log") || line.startsWith("Runtime: hunter footstep")) android.util.Log.i("BloodborneEvents",line);
+                        if (line.startsWith("Runtime: event log") || line.startsWith("Runtime: hunter footstep") || line.startsWith("Runtime: rumble")) android.util.Log.i("BloodborneEvents",line);
                         if (!driverTrouble && driverTrouble(line)) driverTrouble=true;
                         if (line.startsWith("STOP:")) stopLine=line; // the native code's own reason (a miss, a library for another game build)
                     }

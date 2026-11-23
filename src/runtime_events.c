@@ -22,7 +22,16 @@
  *   PV <large> <small>                                         scePadSetVibration bytes, when they change
  *   START, HOOK <name> <status>, DROP <lines>, CAP             bookkeeping
  * Lines are appended under a mutex to an in-memory buffer; a writer thread appends it to the file (opened once, O_APPEND,
- * no fsync) every 250 ms and soon after each R/PV line. The game threads never wait for the file. The file stops at 64 MiB. */
+ * no fsync) every 250 ms and soon after each R/PV line. The game threads never wait for the file. The file stops at 64 MiB.
+ *
+ * Rumble file. With BB_RUMBLE_FILE set (the app's "<large> <small>\n", 0-255), hook R4 is set also without BB_EVENT_LOG,
+ * and while it is installed it drives that file instead of scePadSetVibration (runtime_pad.c): the game sends the light
+ * motor to scePadSetVibration as a PWM bit (0/1 per frame, 0xf95be0), so the app would only see it on or off, while R4
+ * has both motors' values before that. They are converted as the game converts the heavy one (clamped to 0..1, times
+ * 255, truncated, so large matches scePadSetVibration's byte). R4 runs only while the pad is active (0xf91940 returns
+ * early otherwise, and the per-frame sender then sends zeros), so when it has not run for MOTOR_STALE_MS the file is set
+ * to 0 0, or to the bytes of scePadSetVibration calls made since then (small 0 or 255). The game threads only note the
+ * values; a thread writes the file (tmp + rename) when what it should hold changes. */
 #define _GNU_SOURCE
 #include "runtime.h"
 #ifdef __ANDROID__
@@ -46,6 +55,8 @@
 #define RUMBLE_STALE_MS 150 /* an R1 entry not seen for this long is no longer applied */
 #define RUMBLES 64
 #define NAME_MAX_CHARS 96
+#define MOTOR_STALE_MS 250 /* rumble file: a source not called for this long no longer counts */
+#define MOTOR_RETRY_MS 250 /* rumble file: a failed write is tried again after this at the latest */
 
 static unsigned char *image_base;
 static int log_fd=-1;
@@ -63,6 +74,13 @@ static unsigned long long now_ms(void) {
     struct timespec t;
     if (clock_gettime(CLOCK_BOOTTIME,&t)) return 0;
     return (unsigned long long)t.tv_sec*1000u+(unsigned long long)t.tv_nsec/1000000u;
+}
+static void monotonic_cond(pthread_cond_t *cond) {
+    pthread_condattr_t attributes;
+    pthread_condattr_init(&attributes);
+    pthread_condattr_setclock(&attributes,CLOCK_MONOTONIC);
+    pthread_cond_init(cond,&attributes);
+    pthread_condattr_destroy(&attributes);
 }
 
 /* With lock held: appends "<ms> <text>\n". The time is taken here, so the file's lines are in time order. */
@@ -161,6 +179,94 @@ static void *writer(void *arg) {
         flush_file();
     }
     return NULL;
+}
+
+/* ---- The rumble file (BB_RUMBLE_FILE) from R4's motor values, see the top ---- */
+typedef struct { int large, small; unsigned long long seen; } Motors; /* 0..255 each; seen: now_ms, 0 never */
+static pthread_mutex_t motor_lock=PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t motor_wake;
+static const char *rumble_path;
+static int rumble_from_r4;              /* set before the game runs */
+static Motors r4_motors, pv_motors;     /* hook R4, scePadSetVibration */
+static int written_large=-1, written_small=-1;
+
+/* As 0xf95be0 converts the heavy motor: below 0 (or NaN) 0, above 1 255, else times 255 truncated. */
+static int motor_byte(float value) { return !(value>0.0f) ? 0 : value>1.0f ? 255 : (int)(value*255.0f); }
+static int motors_fresh(const Motors *m, unsigned long long ms) { return m->seen && (long long)(ms-m->seen)<=MOTOR_STALE_MS; }
+
+/* With motor_lock held: what the file should hold at ms (R4's values; else scePadSetVibration's, from calls after R4
+ * went stale: in the frames where R4 ran they are its PWM bits; else 0 0), and when that changes without a new call
+ * (0: never, it is 0 0). */
+static void motor_target(unsigned long long ms, int *large, int *small, unsigned long long *again) {
+    const Motors *m=NULL;
+    if (motors_fresh(&r4_motors,ms)) m=&r4_motors;
+    else if (motors_fresh(&pv_motors,ms) && pv_motors.seen>r4_motors.seen+MOTOR_STALE_MS) m=&pv_motors;
+    *large=m ? m->large : 0;
+    *small=m ? m->small : 0;
+    *again=*large || *small ? m->seen+MOTOR_STALE_MS+1 : 0;
+}
+
+/* A game thread's values; the writer is woken when the file should change. */
+static void motors_set(Motors *m, int large, int small) {
+    pthread_mutex_lock(&motor_lock);
+    const unsigned long long ms=now_ms();
+    m->large=large; m->small=small; m->seen=ms;
+    int want_large, want_small;
+    unsigned long long again;
+    motor_target(ms,&want_large,&want_small,&again);
+    if (want_large!=written_large || want_small!=written_small) pthread_cond_signal(&motor_wake);
+    pthread_mutex_unlock(&motor_lock);
+}
+
+static int rumble_write(int large, int small) {
+    char tmp[512];
+    if (snprintf(tmp,sizeof(tmp),"%s.tmp",rumble_path)>=(int)sizeof(tmp)) return 0;
+    FILE *f=fopen(tmp,"w");
+    if (!f) return 0;
+    fprintf(f,"%d %d\n",large,small);
+    return fclose(f)==0 && rename(tmp,rumble_path)==0;
+}
+
+static void *motor_writer(void *arg) {
+    (void)arg;
+    pthread_mutex_lock(&motor_lock);
+    for (;;) {
+        const unsigned long long ms=now_ms();
+        int large, small;
+        unsigned long long again;
+        motor_target(ms,&large,&small,&again);
+        if (large!=written_large || small!=written_small) {
+            pthread_mutex_unlock(&motor_lock);
+            const int written=rumble_write(large,small);
+            pthread_mutex_lock(&motor_lock);
+            if (written) { written_large=large; written_small=small; continue; }
+            again=ms+MOTOR_RETRY_MS;
+        }
+        if (!again) { pthread_cond_wait(&motor_wake,&motor_lock); continue; }
+        const unsigned long long wait=again>ms ? again-ms : 1;
+        struct timespec until;
+        clock_gettime(CLOCK_MONOTONIC,&until);
+        until.tv_sec+=(time_t)(wait/1000u);
+        until.tv_nsec+=(long)(wait%1000u)*1000000L;
+        if (until.tv_nsec>=1000000000L) { until.tv_nsec-=1000000000L; ++until.tv_sec; }
+        pthread_cond_timedwait(&motor_wake,&motor_lock,&until);
+    }
+    return NULL;
+}
+
+/* After the hooks are set: R4 drives the file when it is installed (hooked) and the writer runs. */
+static void rumble_start(const char *path, int hooked, const char *status) {
+    if (!hooked) { printf("Runtime: rumble file from scePadSetVibration (hook R4 %s)\n",status); return; }
+    rumble_path=path;
+    monotonic_cond(&motor_wake);
+    pthread_t thread;
+    if (pthread_create(&thread,NULL,motor_writer,NULL)!=0) {
+        puts("Runtime: rumble file from scePadSetVibration (hook R4: no writer thread)");
+        return;
+    }
+    pthread_detach(thread);
+    rumble_from_r4=1;
+    puts("Runtime: rumble file from hook R4 (the game's motor values)");
 }
 
 /* ---- The hooks (game threads: read registers and memory only, never change them) ---- */
@@ -267,11 +373,13 @@ static uint32_t hook_r3(void *context, GuestRegsEx *regs) {
     return GUEST_HOOK_CONTINUE;
 }
 /* R4, 0xf91946 (0xf91940, the pad device's motor setter, while the pad is active): xmm1 heavy (large motor),
- * xmm0 light (small motor), both 0..1 and already scaled by the vibration option. */
+ * xmm0 light (small motor), both 0..1 and already scaled by the vibration option. Logged, and the rumble file's source. */
 static long last_heavy=-1, last_light=-1; /* in hundredths, as logged */
 static uint32_t hook_r4(void *context, GuestRegsEx *regs) {
     (void)context;
     const float heavy=xmm_float(regs,1), light=xmm_float(regs,0);
+    if (rumble_from_r4) motors_set(&r4_motors,motor_byte(heavy),motor_byte(light));
+    if (log_fd<0) return GUEST_HOOK_CONTINUE;
     const long heavy_centi=lrintf(heavy*100.0f), light_centi=lrintf(light*100.0f);
     pthread_mutex_lock(&lock);
     if (heavy_centi!=last_heavy || light_centi!=last_light) {
@@ -283,16 +391,20 @@ static uint32_t hook_r4(void *context, GuestRegsEx *regs) {
     return GUEST_HOOK_CONTINUE;
 }
 
-void runtime_events_vibration(unsigned large, unsigned small) {
+int runtime_events_vibration(unsigned large, unsigned small) {
     static int last_large=-1, last_small=-1;
-    if (log_fd<0) return;
-    pthread_mutex_lock(&lock);
-    if ((int)large!=last_large || (int)small!=last_small) {
-        last_large=(int)large; last_small=(int)small;
-        format_locked("PV %u %u",large,small);
-        urgent=1; pthread_cond_signal(&wake);
+    if (log_fd>=0) {
+        pthread_mutex_lock(&lock);
+        if ((int)large!=last_large || (int)small!=last_small) {
+            last_large=(int)large; last_small=(int)small;
+            format_locked("PV %u %u",large,small);
+            urgent=1; pthread_cond_signal(&wake);
+        }
+        pthread_mutex_unlock(&lock);
     }
-    pthread_mutex_unlock(&lock);
+    if (!rumble_from_r4) return 0;
+    motors_set(&pv_motors,large>255u ? 255 : (int)large,small ? 255 : 0);
+    return 1;
 }
 
 typedef struct {
@@ -317,43 +429,52 @@ static const Site sites[]={
     {"R4",   0x00f91946,4, 9,{0x48,0x8b,0x47,0x10,0xc5,0xfa,0x11,0x48,0x14},hook_r4},
 };
 
-void runtime_events_install(unsigned char *image, size_t size) {
-    const char *path=getenv("BB_EVENT_LOG");
-    if (!path || !*path) return;
-    if (size<WORLD_CHR_MAN+sizeof(uint64_t)) { puts("Runtime: event log: unexpected image size, off"); fflush(stdout); return; }
+/* The event log's file and writer thread: 1 when it runs. */
+static int log_start(const char *path, size_t size) {
+    if (size<WORLD_CHR_MAN+sizeof(uint64_t)) { puts("Runtime: event log: unexpected image size, off"); fflush(stdout); return 0; }
     const int fd=open(path,O_WRONLY|O_CREAT|O_APPEND|O_CLOEXEC,0644);
-    if (fd<0) { printf("Runtime: event log: cannot open %s: %s\n",path,strerror(errno)); fflush(stdout); return; }
+    if (fd<0) { printf("Runtime: event log: cannot open %s: %s\n",path,strerror(errno)); fflush(stdout); return 0; }
     struct stat st;
     if (fstat(fd,&st)==0 && st.st_size>0) total=(unsigned long long)st.st_size;
-    pthread_condattr_t attributes;
-    pthread_condattr_init(&attributes);
-    pthread_condattr_setclock(&attributes,CLOCK_MONOTONIC);
-    pthread_cond_init(&wake,&attributes);
-    pthread_condattr_destroy(&attributes);
-    image_base=image;
+    monotonic_cond(&wake);
     log_fd=fd;
     pthread_t thread;
     if (pthread_create(&thread,NULL,writer,NULL)!=0) {
         log_fd=-1; close(fd);
         puts("Runtime: event log: no writer thread, off"); fflush(stdout);
-        return;
+        return 0;
     }
     pthread_detach(thread);
     atexit(flush_file);
     emit(0,"START event log 1 pid=%d",(int)getpid());
-    int installed=0;
+    return 1;
+}
+
+void runtime_events_install(unsigned char *image, size_t size) {
+    const char *path=getenv("BB_EVENT_LOG"), *rumble=getenv("BB_RUMBLE_FILE");
+    if (rumble && !*rumble) rumble=NULL;
+    image_base=image;
+    const int logging=path && *path && log_start(path,size);
+    if (!logging && !rumble) return;
+    int installed=0, r4=0;
+    const char *r4_status="not found";
     for (size_t i=0;i<sizeof(sites)/sizeof(sites[0]);++i) {
         const Site *s=&sites[i];
+        const int motors=s->hook==hook_r4; /* also for the rumble file */
+        if (!logging && !motors) continue;
         const uintptr_t address=(uintptr_t)(image+s->site);
         const char *status="installed";
         if (s->site+s->check_length>size || memcmp(image+s->site,s->check,s->check_length)) status="skipped: signature mismatch";
         else if (!guest_cpu_has_hook_slot(address)) status="skipped: no hook slot (native code built without hooks-events.txt)";
         else if (!guest_cpu_hook_slot(address,s->length,s->hook,NULL)) status="skipped: hook slot refused";
-        else ++installed;
+        else { ++installed; r4|=motors; }
+        if (motors) r4_status=status;
+        if (!logging) continue;
         printf("Runtime: event log hook %s %s\n",s->name,status);
         emit(0,"HOOK %s %s",s->name,status);
     }
-    printf("Runtime: event log: %d of %zu hooks installed, writing %s\n",installed,sizeof(sites)/sizeof(sites[0]),path);
+    if (logging) printf("Runtime: event log: %d of %zu hooks installed, writing %s\n",installed,sizeof(sites)/sizeof(sites[0]),path);
+    if (rumble) rumble_start(rumble,r4,r4_status);
     fflush(stdout);
 }
 #endif
