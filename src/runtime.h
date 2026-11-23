@@ -235,7 +235,8 @@ void runtime_pad_report(void);
 void runtime_pad_install_footsteps(unsigned char *image, size_t size);
 /* Haptics event log (src/runtime_events.c): with BB_EVENT_LOG set, the sound and rumble events of CUSA03173 v1.09
  * (hook slots, each set only when its site's bytes match) and the pad's vibration bytes are appended to that file.
- * With BB_RUMBLE_FILE set, its hook R4 (the game's motor values) also drives that file when it is installed. */
+ * With BB_RUMBLE_FILE set, its hook R4 (the game's motor values) also drives that file when it is installed. With
+ * BB_EVENT_PIPE set (the app's FIFO), the player's sounds and the rumble starts and ends are written to it as lines. */
 void runtime_events_install(unsigned char *image, size_t size);
 /* scePadSetVibration's bytes (logged; the rumble file's fallback source): 1 when hook R4 drives BB_RUMBLE_FILE, so
  * pad_vibration leaves it alone. */

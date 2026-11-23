@@ -31,15 +31,28 @@
  * 255, truncated, so large matches scePadSetVibration's byte). R4 runs only while the pad is active (0xf91940 returns
  * early otherwise, and the per-frame sender then sends zeros), so when it has not run for MOTOR_STALE_MS the file is set
  * to 0 0, or to the bytes of scePadSetVibration calls made since then (small 0 or 255). The game threads only note the
- * values; a thread writes the file (tmp + rename) when what it should hold changes. */
+ * values; a thread writes the file (tmp + rename) when what it should hold changes.
+ *
+ * Event pipe. With BB_EVENT_PIPE set (a FIFO the app made and reads), hooks S1, S2 and R1 are set also without
+ * BB_EVENT_LOG (the event log works as before), and the app gets one line per event, ms as above:
+ *   <ms> H <hook>...      first, once: the pipe's hooks that are installed (of S1 S2 R1), e.g. "H S1 S2 R1"
+ *   <ms> S <letter><9-digit id>   a sound of the player character (S1 or S2, as in the log's lines)
+ *   <ms> R+ <id> / <ms> R- <id>   a rumble starts / ends (as the log's R1+ / R1- lines)
+ * The game threads only queue a line into a ring buffer under a mutex (a full ring drops the line); a writer thread
+ * writes whole lines to the FIFO, opened O_WRONLY|O_NONBLOCK: with no reader yet (ENXIO) the open is tried again
+ * every PIPE_RETRY_MS and the queued lines wait; a full pipe (EAGAIN) drops the lines; after EPIPE (the reader went
+ * away) it is opened again. SIGPIPE is blocked in that thread. Rumbles are swept from there too, so their R- comes
+ * without the log's writer. */
 #define _GNU_SOURCE
 #include "runtime.h"
 #ifdef __ANDROID__
 #include "guest_cpu.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
 #include <math.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -57,6 +70,11 @@
 #define NAME_MAX_CHARS 96
 #define MOTOR_STALE_MS 250 /* rumble file: a source not called for this long no longer counts */
 #define MOTOR_RETRY_MS 250 /* rumble file: a failed write is tried again after this at the latest */
+#define PIPE_RING_BYTES (16u*1024u)
+#define PIPE_LINE_MAX 64   /* one event pipe line, "\n" included */
+#define PIPE_CHUNK (PIPE_BUF<4096 ? PIPE_BUF : 4096) /* a pipe write up to PIPE_BUF is all or nothing */
+#define PIPE_RETRY_MS 500  /* event pipe: open again after ENXIO (no reader yet) or a failure */
+#define PIPE_SWEEP_MS 100  /* event pipe: rumbles are swept this often while one runs */
 
 static unsigned char *image_base;
 static int log_fd=-1;
@@ -83,9 +101,16 @@ static void monotonic_cond(pthread_cond_t *cond) {
     pthread_condattr_destroy(&attributes);
 }
 
-/* With lock held: appends "<ms> <text>\n". The time is taken here, so the file's lines are in time order. */
+/* With lock held: the log's writer writes out soon (nothing without the log). */
+static void log_wake_locked(void) {
+    if (log_fd<0) return;
+    urgent=1; pthread_cond_signal(&wake);
+}
+
+/* With lock held: appends "<ms> <text>\n" (nothing without the log). The time is taken here, so the file's lines
+ * are in time order. */
 static void append_locked(const char *text, size_t length) {
-    if (capped) return;
+    if (log_fd<0 || capped) return;
     char stamp[24];
     const int s=snprintf(stamp,sizeof(stamp),"%llu ",now_ms());
     if (s<0) return;
@@ -125,9 +150,41 @@ static void emit(int flush, const char *format, ...) {
     va_list args; va_start(args,format);
     pthread_mutex_lock(&lock);
     vformat_locked(format,args);
-    if (flush) { urgent=1; pthread_cond_signal(&wake); }
+    if (flush) log_wake_locked();
     pthread_mutex_unlock(&lock);
     va_end(args);
+}
+
+/* ---- The event pipe's ring (BB_EVENT_PIPE, see the top). pipe_lock may be taken with lock held, never the reverse. ---- */
+static pthread_mutex_t pipe_lock=PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t pipe_wake;
+static char pipe_ring[PIPE_RING_BYTES];
+static size_t pipe_head, pipe_fill;  /* the oldest queued byte, the bytes queued (whole lines) */
+static unsigned long pipe_dropped;   /* lines lost to a full ring, a full pipe or no reader */
+static const char *pipe_path;
+static int pipe_on;                  /* set before the hooks: the writer runs and the hooks queue lines */
+
+/* Queues "<ms> <text>\n" for the app, from any thread (also with lock held); dropped when the ring is full. */
+__attribute__((format(printf,1,2)))
+static void pipe_line(const char *format, ...) {
+    char line[PIPE_LINE_MAX];
+    int n=snprintf(line,sizeof(line),"%llu ",now_ms());
+    if (n<0 || (size_t)n>=sizeof(line)) return;
+    va_list args; va_start(args,format);
+    const int text=vsnprintf(line+n,sizeof(line)-(size_t)n,format,args);
+    va_end(args);
+    if (text<0 || (size_t)(n+text)>sizeof(line)-1) return; /* never a cut line: room for "\n" */
+    n+=text;
+    line[n++]='\n';
+    pthread_mutex_lock(&pipe_lock);
+    if (pipe_fill+(size_t)n>PIPE_RING_BYTES) ++pipe_dropped;
+    else {
+        size_t at=(pipe_head+pipe_fill)%PIPE_RING_BYTES;
+        for (int i=0;i<n;++i,at=(at+1)%PIPE_RING_BYTES) pipe_ring[at]=line[i];
+        pipe_fill+=(size_t)n;
+        pthread_cond_signal(&pipe_wake);
+    }
+    pthread_mutex_unlock(&pipe_lock);
 }
 
 /* ---- R1: the rumble entries applied per frame, by queue slot ---- */
@@ -137,8 +194,9 @@ static int rumble_count;
 
 static void rumble_end_locked(int i) {
     format_locked("R1- %d last=%llu",rumbles[i].id,rumbles[i].seen);
+    if (pipe_on) pipe_line("R- %d",rumbles[i].id);
     rumbles[i]=rumbles[--rumble_count];
-    urgent=1; pthread_cond_signal(&wake);
+    log_wake_locked();
 }
 static void rumble_sweep_locked(unsigned long long ms) {
     for (int i=0;i<rumble_count;) {
@@ -269,6 +327,120 @@ static void rumble_start(const char *path, int hooked, const char *status) {
     puts("Runtime: rumble file from hook R4 (the game's motor values)");
 }
 
+/* ---- The event pipe's writer (BB_EVENT_PIPE, see the top) ---- */
+static void pipe_report(const char *what) {
+    printf("Runtime: event pipe %s %s\n",pipe_path,what);
+    fflush(stdout);
+}
+
+/* SIGPIPE is blocked in this thread: a write after the reader went away is EPIPE, and the signal it left pending (Linux
+ * sends it to the writing thread) is taken here, so it never reaches the process. */
+static void pipe_take_sigpipe(void) {
+    sigset_t pending, only;
+    if (sigpending(&pending) || !sigismember(&pending,SIGPIPE)) return;
+    sigemptyset(&only); sigaddset(&only,SIGPIPE);
+    int signal_number;
+    sigwait(&only,&signal_number);
+}
+
+static void *pipe_writer(void *arg) {
+    (void)arg;
+    sigset_t blocked;
+    sigemptyset(&blocked); sigaddset(&blocked,SIGPIPE);
+    pthread_sigmask(SIG_BLOCK,&blocked,NULL);
+    int fd=-1, reported=0, ever_open=0;
+    unsigned long long retry_at=0;
+    static char chunk[PIPE_CHUNK];
+    for (;;) {
+        unsigned long long ms=now_ms();
+        if (fd<0 && ms>=retry_at) {
+            fd=open(pipe_path,O_WRONLY|O_NONBLOCK|O_CLOEXEC);
+            struct stat st;
+            if (fd>=0 && (fstat(fd,&st) || !S_ISFIFO(st.st_mode))) { close(fd); fd=-1; errno=EINVAL; }
+#ifdef F_SETNOSIGPIPE
+            if (fd>=0) fcntl(fd,F_SETNOSIGPIPE,1); /* macOS (host tests): there SIGPIPE goes to the process, not the thread */
+#endif
+            if (fd>=0) {
+                if (!ever_open) pipe_report("open");
+                ever_open=1;
+            } else {
+                retry_at=ms+PIPE_RETRY_MS;
+                if (errno!=ENXIO && !reported) {
+                    reported=1;
+                    char what[96];
+                    snprintf(what,sizeof(what),"cannot be opened (%s), trying again",errno==EINVAL ? "not a FIFO" : strerror(errno));
+                    pipe_report(what);
+                }
+            }
+        }
+        /* The last rumbles end (R-) also when no R1 call follows. */
+        pthread_mutex_lock(&lock);
+        rumble_sweep_locked(ms);
+        const int sweeping=rumble_count>0;
+        pthread_mutex_unlock(&lock);
+
+        pthread_mutex_lock(&pipe_lock);
+        int timed_out=0;
+        while (!timed_out && (!pipe_fill || fd<0)) {
+            /* Lines wait while there is no reader; the wait ends for the next open or sweep. */
+            unsigned long long wait=0;
+            if (fd<0) wait=retry_at>ms ? retry_at-ms : 1;
+            else if (sweeping) wait=PIPE_SWEEP_MS;
+            if (!wait) { pthread_cond_wait(&pipe_wake,&pipe_lock); continue; }
+            struct timespec until;
+            clock_gettime(CLOCK_MONOTONIC,&until);
+            until.tv_sec+=(time_t)(wait/1000u);
+            until.tv_nsec+=(long)(wait%1000u)*1000000L;
+            if (until.tv_nsec>=1000000000L) { until.tv_nsec-=1000000000L; ++until.tv_sec; }
+            timed_out=pthread_cond_timedwait(&pipe_wake,&pipe_lock,&until)==ETIMEDOUT;
+            ms=now_ms();
+        }
+        if (fd<0 || !pipe_fill) { pthread_mutex_unlock(&pipe_lock); continue; }
+        /* Whole lines, at most PIPE_CHUNK bytes: the write is all or nothing. */
+        size_t n=0, whole=0;
+        while (n<pipe_fill && n<sizeof(chunk)) {
+            const char c=pipe_ring[(pipe_head+n)%PIPE_RING_BYTES];
+            chunk[n++]=c;
+            if (c=='\n') whole=n;
+        }
+        if (!whole) whole=n; /* cannot happen: lines are shorter than a chunk */
+        unsigned long lines=0;
+        for (size_t i=0;i<whole;++i) lines+=chunk[i]=='\n';
+        pipe_head=(pipe_head+whole)%PIPE_RING_BYTES;
+        pipe_fill-=whole;
+        pthread_mutex_unlock(&pipe_lock);
+        ssize_t w;
+        do w=write(fd,chunk,whole); while (w<0 && errno==EINTR);
+        if (w==(ssize_t)whole) continue;
+        if (w<0 && errno==EPIPE) {
+            pipe_take_sigpipe();
+            close(fd); fd=-1; retry_at=0; /* the reader went away: open again now, then every PIPE_RETRY_MS */
+            pipe_report("lost its reader, opening it again");
+        } else if (w<0 && errno!=EAGAIN) {
+            close(fd); fd=-1; retry_at=now_ms()+PIPE_RETRY_MS;
+        }
+        pthread_mutex_lock(&pipe_lock);
+        pipe_dropped+=lines; /* EAGAIN (the pipe is full), or the reader went away: these lines are lost */
+        pthread_mutex_unlock(&pipe_lock);
+    }
+    return NULL;
+}
+
+/* The event pipe's writer: 1 when it runs (pipe_on is then set, before any hook). */
+static int pipe_start(const char *path) {
+    pipe_path=path;
+    monotonic_cond(&pipe_wake);
+    pthread_t thread;
+    if (pthread_create(&thread,NULL,pipe_writer,NULL)!=0) {
+        printf("Runtime: event pipe %s: no writer thread, off\n",path);
+        fflush(stdout);
+        return 0;
+    }
+    pthread_detach(thread);
+    pipe_on=1;
+    return 1;
+}
+
 /* ---- The hooks (game threads: read registers and memory only, never change them) ---- */
 static int is_player(uint64_t chr) {
     const unsigned char *world=*(const unsigned char *const *)(image_base+WORLD_CHR_MAN);
@@ -282,9 +454,12 @@ static int32_t read32(uint64_t address) { int32_t v; memcpy(&v,(const void *)(ui
 static float xmm_float(const GuestRegsEx *regs, int n) { float v; memcpy(&v,regs->ymm[n],4); return v; }
 
 static void sound(const char *kind, uint64_t chr, uint64_t category, uint64_t id, uint64_t params) {
+    const int player=is_player(chr);
+    if (pipe_on && player) pipe_line("S %c%09d",letter(category),(int32_t)id);
+    if (log_fd<0) return;
     const int32_t raw_type=params ? read32(params) : -1, raw_id=params ? read32(params+4) : -1;
     emit(0,"%s %c%09d raw=%d/%d chr=%c ptr=%llx",kind,letter(category),(int32_t)id,raw_type,raw_id,
-         is_player(chr) ? 'P' : 'O',(unsigned long long)chr);
+         player ? 'P' : 'O',(unsigned long long)chr);
 }
 /* S1, 0x1a26526 (TAE 128, after the trigger, chr-type and material checks): rax character, ecx final category,
  * ebx final id, r14 params ([0] SoundType, [4] SoundID). */
@@ -346,7 +521,8 @@ static uint32_t hook_r1(void *context, GuestRegsEx *regs) {
         else if (rumble_count<RUMBLES) {
             rumbles[rumble_count++]=(Rumble){slot,id,elapsed,ms};
             format_locked("R1+ %d el=%.3f dur=%.2f pos=%u",id,elapsed,duration,positional ? 1u : 0u);
-            urgent=1; pthread_cond_signal(&wake);
+            if (pipe_on) pipe_line("R+ %d",id);
+            log_wake_locked();
         }
     }
     pthread_mutex_unlock(&lock);
@@ -385,7 +561,7 @@ static uint32_t hook_r4(void *context, GuestRegsEx *regs) {
     if (heavy_centi!=last_heavy || light_centi!=last_light) {
         last_heavy=heavy_centi; last_light=light_centi;
         format_locked("R4 %.2f %.2f",heavy,light);
-        urgent=1; pthread_cond_signal(&wake);
+        log_wake_locked();
     }
     pthread_mutex_unlock(&lock);
     return GUEST_HOOK_CONTINUE;
@@ -398,7 +574,7 @@ int runtime_events_vibration(unsigned large, unsigned small) {
         if ((int)large!=last_large || (int)small!=last_small) {
             last_large=(int)large; last_small=(int)small;
             format_locked("PV %u %u",large,small);
-            urgent=1; pthread_cond_signal(&wake);
+            log_wake_locked();
         }
         pthread_mutex_unlock(&lock);
     }
@@ -451,29 +627,42 @@ static int log_start(const char *path, size_t size) {
 }
 
 void runtime_events_install(unsigned char *image, size_t size) {
-    const char *path=getenv("BB_EVENT_LOG"), *rumble=getenv("BB_RUMBLE_FILE");
+    const char *path=getenv("BB_EVENT_LOG"), *rumble=getenv("BB_RUMBLE_FILE"), *pipe=getenv("BB_EVENT_PIPE");
     if (rumble && !*rumble) rumble=NULL;
+    if (pipe && !*pipe) pipe=NULL;
     image_base=image;
     const int logging=path && *path && log_start(path,size);
-    if (!logging && !rumble) return;
+    if (pipe && size<WORLD_CHR_MAN+sizeof(uint64_t)) { puts("Runtime: event pipe: unexpected image size, off"); pipe=NULL; }
+    const int piping=pipe && pipe_start(pipe);
+    if (!logging && !rumble && !piping) { fflush(stdout); return; }
     int installed=0, r4=0;
     const char *r4_status="not found";
+    char piped[16]=""; /* the event pipe's hooks that are installed, for its H line */
     for (size_t i=0;i<sizeof(sites)/sizeof(sites[0]);++i) {
         const Site *s=&sites[i];
         const int motors=s->hook==hook_r4; /* also for the rumble file */
-        if (!logging && !motors) continue;
+        const int for_pipe=piping && (s->hook==hook_s1 || s->hook==hook_s2 || s->hook==hook_r1); /* also for the pipe */
+        if (!logging && !(motors && rumble) && !for_pipe) continue;
         const uintptr_t address=(uintptr_t)(image+s->site);
         const char *status="installed";
         if (s->site+s->check_length>size || memcmp(image+s->site,s->check,s->check_length)) status="skipped: signature mismatch";
         else if (!guest_cpu_has_hook_slot(address)) status="skipped: no hook slot (native code built without hooks-events.txt)";
         else if (!guest_cpu_hook_slot(address,s->length,s->hook,NULL)) status="skipped: hook slot refused";
-        else { ++installed; r4|=motors; }
+        else {
+            ++installed; r4|=motors;
+            if (for_pipe) { strcat(piped," "); strcat(piped,s->name); }
+        }
         if (motors) r4_status=status;
+        if (for_pipe && !logging) printf("Runtime: event pipe hook %s %s\n",s->name,status);
         if (!logging) continue;
         printf("Runtime: event log hook %s %s\n",s->name,status);
         emit(0,"HOOK %s %s",s->name,status);
     }
     if (logging) printf("Runtime: event log: %d of %zu hooks installed, writing %s\n",installed,sizeof(sites)/sizeof(sites[0]),path);
+    if (piping) {
+        pipe_line("H%s",piped);
+        printf("Runtime: event pipe: hooks%s, writing %s\n",*piped ? piped : " none",pipe);
+    }
     if (rumble) rumble_start(rumble,r4,r4_status);
     fflush(stdout);
 }
