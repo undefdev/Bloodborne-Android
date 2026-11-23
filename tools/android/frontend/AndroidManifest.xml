@@ -38,9 +38,11 @@
             </intent-filter>
         </activity>
         <!-- KishiUsbActivity: with it the Kishi's access dialog offers "Always open Bloodborne", which keeps the access across
-             replugs and the Kishi's resets. It is started invisibly when the Kishi appears and closes at once. -->
+             replugs and the Kishi's resets. It is started invisibly when the Kishi appears and closes at once, in a task of its
+             own, so a reset or replug while the game is in the background never brings the game to the front. -->
         <activity android:name="com.ducvd89.bloodborne.KishiUsbActivity" android:exported="true"
-            android:theme="@android:style/Theme.NoDisplay" android:excludeFromRecents="true" android:noHistory="true">
+            android:theme="@android:style/Theme.NoDisplay" android:taskAffinity="com.ducvd89.bloodborne.usb"
+            android:excludeFromRecents="true" android:noHistory="true">
             <intent-filter>
                 <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
             </intent-filter>
