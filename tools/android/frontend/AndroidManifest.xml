@@ -37,6 +37,15 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- KishiUsbActivity: with it the Kishi's access dialog offers "Always open Bloodborne", which keeps the access across
+             replugs and the Kishi's resets. It is started invisibly when the Kishi appears and closes at once. -->
+        <activity android:name="com.ducvd89.bloodborne.KishiUsbActivity" android:exported="true"
+            android:theme="@android:style/Theme.NoDisplay" android:excludeFromRecents="true" android:noHistory="true">
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
+            </intent-filter>
+            <meta-data android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" android:resource="@xml/kishi_usb_devices" />
+        </activity>
         <!-- Hunter's Atlas' map on a second display that refuses a Presentation: its own task on that display, never in
              recents, not focusable (AtlasActivity). No orientation lock: it follows the display. -->
         <activity android:name="com.ducvd89.bloodborne.AtlasActivity" android:exported="false"
