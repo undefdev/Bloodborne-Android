@@ -24,6 +24,9 @@ final class PadBridge {
     private int virtualLx=128, virtualLy=128, virtualRx=128, virtualRy=128, virtualL2, virtualR2;
     private boolean virtualLeftActive, virtualRightActive;
     private boolean queued;
+    /** The game has no world (the runtime's "W 0"): the physical left stick is the d-pad (MenuStick). */
+    private boolean menuStick;
+    private String stickDirection;
     /** The 16 button names, in the order the remap menu lists them. */
     static final String[] BUTTONS={"cross","circle","square","triangle","l1","r1","l2","r2","l3","r3","options","touchpad","up","down","left","right"};
     private static final int TRIGGER_PRESS=64;
@@ -126,8 +129,16 @@ final class PadBridge {
         write();
     }
 
+    /** Turns the left stick into the d-pad (on) or back into the stick (off), from the next write on. Main thread. */
+    void menuStick(boolean on) {
+        if (menuStick==on) return;
+        menuStick=on;
+        stickDirection=null;
+        write();
+    }
+
     void reset() {
-        keys.clear(); lx=ly=rx=ry=128; l2=r2=hatX=hatY=0;
+        keys.clear(); lx=ly=rx=ry=128; l2=r2=hatX=hatY=0; stickDirection=null;
         virtualKeys.clear(); virtualLx=virtualLy=virtualRx=virtualRy=128;
         virtualL2=virtualR2=0; virtualLeftActive=virtualRightActive=false;
         write();
@@ -158,14 +169,20 @@ final class PadBridge {
         if (hatX<0) button(all,trigger,"left"); if (hatX>0) button(all,trigger,"right");
         if (hatY<0) button(all,trigger,"up"); if (hatY>0) button(all,trigger,"down");
         analog(all,trigger,"l2",l2); analog(all,trigger,"r2",r2);
+        int leftX=lx, leftY=ly;
+        if (menuStick) {
+            stickDirection=MenuStick.direction(lx-128,ly-128,stickDirection);
+            if (stickDirection!=null) button(all,trigger,stickDirection);
+            leftX=leftY=128; // the menus take the d-pad only: the stick itself stays centered
+        }
         all.addAll(virtualKeys);
         int leftTrigger=Math.max(trigger[0],virtualL2), rightTrigger=Math.max(trigger[1],virtualR2);
         for (String key:all) {
             if ((key.equals("l2") && leftTrigger>0) || (key.equals("r2") && rightTrigger>0)) continue;
             text.append(key).append(' ');
         }
-        text.append("lx=").append(virtualLeftActive ? virtualLx : lx)
-            .append(" ly=").append(virtualLeftActive ? virtualLy : ly)
+        text.append("lx=").append(virtualLeftActive ? virtualLx : leftX)
+            .append(" ly=").append(virtualLeftActive ? virtualLy : leftY)
             .append(" rx=").append(virtualRightActive ? virtualRx : rx)
             .append(" ry=").append(virtualRightActive ? virtualRy : ry)
             .append(" l2=").append(leftTrigger).append(" r2=").append(rightTrigger).append('\n');

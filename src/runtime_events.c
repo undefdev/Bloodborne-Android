@@ -20,6 +20,9 @@
  *   R4 <heavy> <light>                                         motor values 0..1 the game sets (after the vibration
  *                                                              option), when either two-decimal value changes
  *   PV <large> <small>                                         scePadSetVibration bytes, when they change
+ *   W 0|1                                                      the player character is in a world (1) or not (0: the
+ *                                                              title and its menus, a loading screen), when it changes
+ *                                                              (runtime_atlas.c's position read, only with the event pipe)
  *   START, HOOK <name> <status>, DROP <lines>, CAP             bookkeeping
  * Lines are appended under a mutex to an in-memory buffer; a writer thread appends it to the file (opened once, O_APPEND,
  * no fsync) every 250 ms and soon after each R/PV line. The game threads never wait for the file. The file stops at 64 MiB.
@@ -38,6 +41,8 @@
  *   <ms> H <hook>...      first, once: the pipe's hooks that are installed (of S1 S2 R1), e.g. "H S1 S2 R1"
  *   <ms> S <letter><9-digit id>   a sound of the player character (S1 or S2, as in the log's lines)
  *   <ms> R+ <id> / <ms> R- <id>   a rumble starts / ends (as the log's R1+ / R1- lines)
+ *   <ms> W 0|1                    the player character left / entered a world (as the log's W lines): the app makes the
+ *                                 left stick the d-pad while it is 0
  * The game threads only queue a line into a ring buffer under a mutex (a full ring drops the line); a writer thread
  * writes whole lines to the FIFO, opened O_WRONLY|O_NONBLOCK: with no reader yet (ENXIO) the open is tried again
  * every PIPE_RETRY_MS and the queued lines wait; a full pipe (EAGAIN) drops the lines; after EPIPE (the reader went
@@ -581,6 +586,15 @@ int runtime_events_vibration(unsigned large, unsigned small) {
     if (!rumble_from_r4) return 0;
     motors_set(&pv_motors,large>255u ? 255 : (int)large,small ? 255 : 0);
     return 1;
+}
+
+void runtime_events_world(int present) {
+    static int last=-1;
+    present=present ? 1 : 0;
+    if (present==last) return;
+    last=present;
+    if (log_fd>=0) emit(1,"W %d",present);
+    if (pipe_on) pipe_line("W %d",present);
 }
 
 typedef struct {

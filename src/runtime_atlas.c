@@ -287,6 +287,31 @@ static void next_tick(struct timespec *t) {
     t->tv_nsec += PublishNs;
     if (t->tv_nsec >= 1000000000L) { t->tv_nsec -= 1000000000L; ++t->tv_sec; }
 }
+static void sleep_tick(struct timespec *next) {
+    next_tick(next);
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    if (now.tv_sec > next->tv_sec + 1) *next = now; /* far behind (suspended): do not burst */
+    clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, next, NULL);
+}
+
+/* The event pipe's world state (runtime_events_world, "W 0|1"): in a world as soon as a position reads, out of it only
+ * after WorldGoneTicks reads in a row without one, so a read that fails once in a world never makes the app's left
+ * stick the d-pad. On the title the first "W 0" comes after that second. */
+enum { WorldGoneTicks = 20 };
+static void world_tick(int valid) {
+#ifdef __ANDROID__
+    static unsigned missing;
+    if (valid) {
+        missing = 0;
+        runtime_events_world(1);
+    } else if (missing < WorldGoneTicks && ++missing == WorldGoneTicks) {
+        runtime_events_world(0);
+    }
+#else
+    (void)valid;
+#endif
+}
 
 typedef struct { void *image; uint64_t size; const char *file, *flags_file; } AtlasArgs;
 static void *atlas_thread(void *argument) {
@@ -314,22 +339,53 @@ static void *atlas_thread(void *argument) {
     for (uint32_t tick = 0;; ++tick) {
         Position p;
         read_position(&p);
+        world_tick(p.valid);
         int refresh = tick % FlagEvery == 0;
         if (tick % ReloadEvery == 0 && tick && reload_request(args.flags_file, &seen, 0)) refresh = 1;
         if (refresh) read_flags();
         publish(&p, read_menu_open());
-        next_tick(&next);
-        struct timespec now;
-        clock_gettime(CLOCK_MONOTONIC, &now);
-        if (now.tv_sec > next.tv_sec + 1) next = now; /* far behind (suspended): do not burst */
-        clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &next, NULL);
+        sleep_tick(&next);
     }
     return NULL;
 }
 
+/* Without the map: only the world state for the event pipe, from the same position read. */
+static void *world_thread(void *argument) {
+    AtlasArgs args = *(AtlasArgs *)argument;
+    free(argument);
+    prctl(PR_SET_NAME, "bb-world");
+    if (!bind_image(args.image, args.size)) {
+        puts("World: executable layout mismatch; no world state for the event pipe");
+        fflush(stdout);
+        return NULL;
+    }
+    puts("World: the player's presence in a world goes to the event pipe");
+    fflush(stdout);
+    struct timespec next;
+    clock_gettime(CLOCK_MONOTONIC, &next);
+    for (;;) {
+        Position p;
+        read_position(&p);
+        world_tick(p.valid);
+        sleep_tick(&next);
+    }
+    return NULL;
+}
+static void start_world(void *image, uint64_t size) {
+    const char *events = getenv("BB_EVENT_PIPE");
+    if (!events || !*events) return;
+    if (pipe2(probe_pipe, O_NONBLOCK | O_CLOEXEC)) { puts("World: no safe way to read game memory"); fflush(stdout); return; }
+    AtlasArgs *args = malloc(sizeof(*args));
+    if (!args) return;
+    *args = (AtlasArgs){image, size, NULL, NULL};
+    pthread_t thread;
+    if (pthread_create(&thread, NULL, world_thread, args) == 0) pthread_detach(thread);
+    else free(args);
+}
+
 void runtime_atlas_start(void *image, uint64_t size) {
     const char *file = getenv("BB_ATLAS_FILE"), *flags_file = getenv("BB_ATLAS_FLAGS_FILE");
-    if (!file || !*file) return;
+    if (!file || !*file) { start_world(image, size); return; }
     map = open_file(file);
     if (!map) { printf("Atlas: cannot open %s\n", file); fflush(stdout); return; }
     init_file();

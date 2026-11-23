@@ -174,6 +174,8 @@ public final class MainActivity extends Activity {
         pad.remap(ButtonRemapDialog.load(getSharedPreferences("bloodborne",MODE_PRIVATE)));
         rumble=new RumbleBridge(this,new File(BASE,"android-rumble.state"));
         rumble.setEnabled(vibrationEnabled()); rumble.start();
+        // Where the game has no world (the title and its menus take only the d-pad), the left stick is the d-pad.
+        rumble.setWorldListener(present -> pad.menuStick(!present));
         audio=new AudioBridge(new File(BASE,"audio.fifo")); audio.start();
         buildScreen();
         immersive();
@@ -2018,8 +2020,10 @@ public final class MainActivity extends Activity {
             File gameLog=new File(BASE,"logs/android-game.log"), previous=new File(BASE,"logs/android-game.prev.log");
             gameLog.getParentFile().mkdirs();
             if (gameLog.length()>0) { previous.delete(); gameLog.renameTo(previous); }
-            // The workbench's haptics design (<game folder>/haptics/haptics.json): the runtime sends the player's sounds and the
-            // rumble starts and ends through a FIFO the app reads (BB_EVENT_PIPE). Without it, haptics as before.
+            // The runtime sends the player's sounds, the rumble starts and ends and whether a world is loaded through a FIFO
+            // the app reads (BB_EVENT_PIPE). The sounds and rumbles play the workbench's haptics design
+            // (<game folder>/haptics/haptics.json); without it, haptics as before. The world state makes the left stick the
+            // d-pad on the title and its menus.
             String eventPipe=rumble.setGame(gameDir==null ? null : new File(gameDir));
             if (eventPipe!=null) extra.add("BB_EVENT_PIPE="+eventPipe);
             // Haptics event log build: the game appends its sound and rumble events to <game folder>/haptics/events.log

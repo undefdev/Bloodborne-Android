@@ -42,6 +42,9 @@ final class RumbleBridge {
     private long lastFootstep;
     private boolean testing;
     private final Runnable endTest = this::stopTest;
+    /** Told on the main thread whether the game has a world (the pipe's "W" lines; true again at each game start). */
+    interface WorldListener { void world(boolean present); }
+    private WorldListener world;
 
     RumbleBridge(Context context, File file) {
         this.context=context;
@@ -50,6 +53,9 @@ final class RumbleBridge {
         kishi=new KishiHaptics(context,() -> { if (enabled && !drawer && !paused) apply(); });
         pipe=new EventPipe(new File(context.getFilesDir(),"haptics-events.fifo"),e -> handler.post(() -> event(e)));
     }
+
+    /** Who hears the pipe's world state (MainActivity: the menus' stick). Main thread. */
+    void setWorldListener(WorldListener l) { world=l; }
 
     /** Starts watching; the file is not read (an old value must not replay). Main thread. */
     void start() {
@@ -84,14 +90,15 @@ final class RumbleBridge {
             try { table=HapticsTable.load(gameDir); }
             catch (HapticsTable.Invalid e) { why=e.getMessage(); }
         }
-        handler.post(() -> pipeSounds=false);
+        handler.post(() -> { pipeSounds=false; if (world!=null) world.world(true); });
         if (table==null) {
             FootstepTracks tracks=gameDir==null ? null : FootstepTracks.load(gameDir);
             kishi.setTable(null);
             kishi.setTracks(tracks);
             android.util.Log.i(TAG,"Haptics: "+HapticsTable.FILE+" not used ("+why+"): footsteps from "
                 +(tracks!=null ? FootstepTracks.FILE : "the built-in patterns")+", rumble as motor frames");
-            return null;
+            // The pipe still carries the world state (the menus' stick); its sounds are not played without the design.
+            return pipe.open();
         }
         kishi.setTracks(null);
         kishi.setTable(table);
@@ -187,6 +194,7 @@ final class RumbleBridge {
         switch (e.kind) {
             case HOOKS: if (e.hook("S1")) pipeSounds=true; break;
             case RUMBLE_START: case RUMBLE_END: kishi.rumble(e.kind==HapticEvent.Kind.RUMBLE_START,e.id); break;
+            case WORLD: if (world!=null) world.world(e.id==1); break;
             case SOUND:
                 pipeSounds=true;
                 long age=SystemClock.elapsedRealtime()-e.ms;

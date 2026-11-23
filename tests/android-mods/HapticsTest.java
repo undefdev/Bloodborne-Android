@@ -370,8 +370,27 @@ final class HapticsTest {
             T.eq(HapticEvent.Kind.RUMBLE_START, HapticEvent.parse("1 R+ 80").kind);
             T.eq(80, HapticEvent.parse("1 R+ 80").id);
             T.eq(HapticEvent.Kind.RUMBLE_END, HapticEvent.parse("2 R- 0").kind);
+            HapticEvent w = HapticEvent.parse("77 W 1");
+            T.eq(HapticEvent.Kind.WORLD, w.kind);
+            T.eq(1, w.id, "in a world");
+            T.eq(0, HapticEvent.parse("78 W 0").id, "no world");
             for (String bad : new String[] {null, "", "\n", "S c000001004", "x S c000001004", "-1 S c000001004", "12 S c00000", "12 S", "12 R+",
-                "12 R+ x", "12 R* 1", "12 Q 1", "12 S c000001004 extra"}) T.eq(null, HapticEvent.parse(bad), "<" + bad + ">");
+                "12 R+ x", "12 R* 1", "12 Q 1", "12 S c000001004 extra", "12 W", "12 W 2", "12 W x", "12 W 1 1"})
+                T.eq(null, HapticEvent.parse(bad), "<" + bad + ">");
+        });
+
+        T.test("menu stick: the left stick as the d-pad, with hysteresis", () -> {
+            T.eq(null, MenuStick.direction(0, 0, null), "centered");
+            T.eq("up", MenuStick.direction(0, -128, null), "full up (y grows down)");
+            T.eq("down", MenuStick.direction(0, 127, null));
+            T.eq("left", MenuStick.direction(-128, 0, null));
+            T.eq("right", MenuStick.direction(127, 0, null));
+            T.eq(null, MenuStick.direction(0, -50, null), "under the press threshold: nothing");
+            T.eq("up", MenuStick.direction(0, -50, "up"), "a held direction stays until the stick falls back");
+            T.eq(null, MenuStick.direction(0, -30, "up"), "released under the release threshold");
+            T.eq("right", MenuStick.direction(100, -90, null), "a diagonal goes to its stronger axis");
+            T.eq("right", MenuStick.direction(127, -10, "up"), "turned to another direction");
+            T.eq(null, MenuStick.direction(-60, 0, "right"), "back across the center: no longer right");
         });
 
         T.test("event route: one reader per FIFO, its lines for the last listener", () -> {

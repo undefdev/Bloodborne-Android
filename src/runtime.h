@@ -241,6 +241,9 @@ void runtime_events_install(unsigned char *image, size_t size);
 /* scePadSetVibration's bytes (logged; the rumble file's fallback source): 1 when hook R4 drives BB_RUMBLE_FILE, so
  * pad_vibration leaves it alone. */
 int runtime_events_vibration(unsigned large, unsigned small);
+/* Whether the player character is in a world (runtime_atlas.c, with BB_EVENT_PIPE set): logged and sent to the event
+ * pipe as "W 0|1" when it changes. */
+void runtime_events_world(int present);
 #endif
 uintptr_t runtime_rtc_resolve(const char *name);
 const char *runtime_file_user_dir(void);

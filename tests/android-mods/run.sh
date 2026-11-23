@@ -23,7 +23,7 @@ src=tools/android/frontend/src/com/ducvd89/bloodborne
     $src/GameCheck.java $src/PkgInstaller.java $src/PkgVerifier.java $src/PkgProgress.java $src/RuntimeCleanup.java $src/FootstepTracks.java \
     $src/KishiReports.java $src/KishiIdleReset.java \
     $src/Effect.java $src/Profile.java $src/FrameEncoder.java $src/Renderer.java $src/Scheduler.java \
-    $src/HapticsTable.java $src/GameHaptics.java $src/HapticEvent.java $src/EventRoute.java
+    $src/HapticsTable.java $src/GameHaptics.java $src/HapticEvent.java $src/EventRoute.java $src/MenuStick.java
 "$jdk/bin/javac" --release 17 -cp "$out/classes" -d "$out/classes" tests/android-mods/T.java tests/android-mods/ModsTest.java \
     tests/android-mods/ParityCli.java tests/android-mods/CleanupTest.java tests/android-mods/SafeWriteTest.java tests/android-mods/FootstepTracksTest.java \
     tests/android-mods/KishiTest.java \

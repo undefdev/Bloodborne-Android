@@ -5,15 +5,16 @@ package com.ducvd89.bloodborne;
  *    "<ms> H S1 S2 R1"   the pipe's hooks that are installed (first, once per game start)
  *    "<ms> S c000001004" a sound of the player character
  *    "<ms> R+ 1", "<ms> R- 1"  a rumble starts / ends
+ *    "<ms> W 1", "<ms> W 0"    the player character entered / left a world (0: the title and its menus, loading)
  *  Plain Java, tested on the host. */
 final class HapticEvent {
-    enum Kind { HOOKS, SOUND, RUMBLE_START, RUMBLE_END }
+    enum Kind { HOOKS, SOUND, RUMBLE_START, RUMBLE_END, WORLD }
 
     final Kind kind;
     final long ms;
     /** HOOKS: the hook names, space-separated (may be empty); SOUND: the sound's name; else null. */
     final String text;
-    /** RUMBLE_*: the rumble id. */
+    /** RUMBLE_*: the rumble id; WORLD: 1 in a world, 0 not. */
     final int id;
 
     private HapticEvent(Kind kind, long ms, String text, int id) {
@@ -42,6 +43,9 @@ final class HapticEvent {
                 try { id = Integer.parseInt(part[2]); } catch (NumberFormatException e) { return null; }
                 return new HapticEvent(part[1].equals("R+") ? Kind.RUMBLE_START : Kind.RUMBLE_END, ms, null, id);
             }
+            case "W":
+                return part.length == 3 && (part[2].equals("0") || part[2].equals("1"))
+                    ? new HapticEvent(Kind.WORLD, ms, null, part[2].equals("1") ? 1 : 0) : null;
             default:
                 return null;
         }
