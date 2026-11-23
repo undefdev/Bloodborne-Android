@@ -17,12 +17,18 @@ import android.os.HandlerThread;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.util.Log;
+import android.view.InputDevice;
+import android.view.KeyEvent;
+import android.view.MotionEvent;
 
 import java.util.Objects;
 
 final class KishiHaptics {
     private static final String TAG = "BloodborneKishi";
     private static final int FRAME_MS = KishiReports.FRAME_MS, SLOTS = KishiReports.SLOTS;
+    private static final int CONTROL_INTERFACE = 3, HAPTICS_INTERFACE = 4;
+    /** After a DeviceReset the Kishi re-enumerates (about 1 s); one that stayed attached is reclaimed after this. */
+    private static final int REATTACH_MS = 3000;
     private static final int HEEL_FREQ = 10, HEEL_SLOTS = 8, HEEL_PERCENT = 40;
     // Without the game folder's tracks: (amplitude 0-63, frequency) per 7.5 ms slot.
     private static final int[] STONE = KishiReports.slots(20, 35);
@@ -44,6 +50,8 @@ final class KishiHaptics {
     private boolean requested, attempted, ready, foreground, enabled = true;
     private int wantedLarge, wantedSmall;
     private volatile FootstepTracks tracks;
+    private final KishiIdleReset idle = new KishiIdleReset();
+    private final Runnable recheck = this::refresh;
     private final BroadcastReceiver events = new BroadcastReceiver() {
         @Override public void onReceive(Context ignored, Intent intent) { refresh(); }
     };
@@ -178,6 +186,32 @@ final class KishiHaptics {
         });
     }
 
+    /** A key event from MainActivity's dispatch (main thread): a gamepad key press counts as controller input. */
+    void input(KeyEvent e) {
+        if (e.getAction() != KeyEvent.ACTION_DOWN || e.getRepeatCount() != 0) return;
+        if (e.isFromSource(InputDevice.SOURCE_GAMEPAD) || e.isFromSource(InputDevice.SOURCE_DPAD)
+                || KeyEvent.isGamepadButton(e.getKeyCode())) controllerInput();
+    }
+
+    /** A motion event from MainActivity's dispatch (main thread): a stick or trigger moved, or the d-pad hat pressed. */
+    void input(MotionEvent e) {
+        if (!e.isFromSource(InputDevice.SOURCE_JOYSTICK) || e.getActionMasked() != MotionEvent.ACTION_MOVE) return;
+        if (KishiIdleReset.active(e.getAxisValue(MotionEvent.AXIS_X), e.getAxisValue(MotionEvent.AXIS_Y),
+                e.getAxisValue(MotionEvent.AXIS_Z), e.getAxisValue(MotionEvent.AXIS_RZ),
+                Math.max(e.getAxisValue(MotionEvent.AXIS_LTRIGGER), e.getAxisValue(MotionEvent.AXIS_BRAKE)),
+                Math.max(e.getAxisValue(MotionEvent.AXIS_RTRIGGER), e.getAxisValue(MotionEvent.AXIS_GAS)),
+                e.getAxisValue(MotionEvent.AXIS_HAT_X), e.getAxisValue(MotionEvent.AXIS_HAT_Y))) controllerInput();
+    }
+
+    /** Real controller input: the Kishi may get its DeviceReset now (KishiIdleReset), on the worker. */
+    private void controllerInput() {
+        if (worker == null) return;
+        String why = idle.input(SystemClock.elapsedRealtime(), ready);
+        if (why == null) return;
+        UsbDevice target = device;
+        worker.post(() -> resetDevice(target, why));
+    }
+
     private static int[] surfacePattern(int material) {
         switch (material) {
             case 1: case 2: case 14: case 15: case 16: case 32: return STONE;
@@ -194,7 +228,7 @@ final class KishiHaptics {
     private void connect(UsbDevice target) {
         for (int i = 0; i < target.getInterfaceCount(); i++) {
             UsbInterface candidate = target.getInterface(i);
-            if (candidate.getId() != 4) continue;
+            if (candidate.getId() != HAPTICS_INTERFACE) continue;
             UsbEndpoint output = endpoint(candidate, 0x04);
             UsbEndpoint input = endpoint(candidate, 0x84);
             if (output == null || input == null) break;
@@ -215,6 +249,57 @@ final class KishiHaptics {
         }
         disconnect();
         Log.w(TAG, "Could not claim the Kishi haptics interface");
+    }
+
+    /** DeviceReset (KishiReports.deviceReset) on the control interface, claimed with force for it and released after;
+     *  nothing else is sent there. The Kishi answers RESET_OK and re-enumerates about a second later: the haptics
+     *  interface is let go now, the USB_DEVICE_DETACHED / ATTACHED broadcasts reconnect (refresh), and a Kishi that
+     *  stayed attached is reclaimed after REATTACH_MS. One log line per reset. Worker thread. */
+    private void resetDevice(UsbDevice target, String why) {
+        String result;
+        boolean sent = false;
+        UsbInterface control = null;
+        if (connection != null && connectedDevice == target) {
+            for (int i = 0; i < target.getInterfaceCount(); i++) {
+                if (target.getInterface(i).getId() == CONTROL_INTERFACE) control = target.getInterface(i);
+            }
+        }
+        if (connection == null || connectedDevice != target) result = "not connected";
+        else if (control == null) result = "no control interface";
+        else if (!connection.claimInterface(control, true)) result = "control interface not claimed";
+        else {
+            try {
+                byte[] report = KishiReports.deviceReset();
+                int n = connection.controlTransfer(0x21, 0x09, 0x0300, CONTROL_INTERFACE, report, report.length, 500);
+                sent = n == report.length;
+                result = sent ? resetAnswer() : "SET_REPORT failed (" + n + ")";
+            } finally {
+                connection.releaseInterface(control);
+            }
+        }
+        Log.i(TAG, "Kishi DeviceReset (" + why + "): " + result);
+        if (!sent) return;
+        disconnect();
+        main.post(() -> {
+            if (worker == null || device != target) return; // already detached: the attach broadcast reconnects
+            attempted = false;
+            setReady(false);
+            main.removeCallbacks(recheck);
+            main.postDelayed(recheck, REATTACH_MS);
+        });
+    }
+
+    /** DeviceReset's answer (GET_REPORT), read again while the Kishi says busy. Worker thread, control interface claimed. */
+    private String resetAnswer() {
+        byte[] answer = new byte[KishiReports.RESET_SIZE];
+        for (int i = 0; i < 10; i++) {
+            SystemClock.sleep(20);
+            int n = connection.controlTransfer(0xA1, 0x01, 0x0300, CONTROL_INTERFACE, answer, answer.length, 500);
+            if (n <= 0) return "no answer (" + n + ")";
+            if (answer[0] == KishiReports.RESET_OK) return "ok";
+            if (answer[0] != KishiReports.RESET_BUSY) return "status " + (answer[0] & 0xff);
+        }
+        return "still busy";
     }
 
     private static UsbEndpoint endpoint(UsbInterface port, int address) {
@@ -284,6 +369,7 @@ final class KishiHaptics {
 
     void close() {
         if (worker == null) return;
+        main.removeCallbacks(recheck);
         context.unregisterReceiver(events);
         device = null;
         ready = false;

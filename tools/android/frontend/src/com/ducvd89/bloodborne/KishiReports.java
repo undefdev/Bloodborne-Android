@@ -3,10 +3,13 @@ package com.ducvd89.bloodborne;
 /** The Kishi V3 Pro's USB reports (KishiHaptics), plain Java so the host tests cover them (tests/android-mods/KishiTest.java).
  *  - Haptics interface 4, endpoint 0x04: Protocol 2.5 stream reports, always zero-padded to REPORT_SIZE bytes; the length
  *    byte keeps the real length. After a shorter write the Kishi (firmware 2.1) rejects every frame larger than the last one
- *    it accepted until it is reset, so Razer's own app pads too. */
+ *    it accepted until it is reset, so Razer's own app pads too.
+ *  - Control interface 3 ("Razer Protocol2.5"): DeviceReset, a feature report. */
 final class KishiReports {
     static final int REPORT_SIZE = 64;
     static final int FRAME_MS = 30, SLOTS = 4; // a frame plays four (amplitude, frequency) slots per grip
+    /** DeviceReset's report size, and the first byte of its answer: busy (read again) or done. */
+    static final int RESET_SIZE = 90, RESET_BUSY = 1, RESET_OK = 2;
 
     private KishiReports() {}
 
@@ -51,5 +54,18 @@ final class KishiReports {
         for (int i = count - 1; i >= 0; i--, bit++) {
             if (((value >> i) & 1) != 0) report[bit / 8] |= 1 << (7 - bit % 8);
         }
+    }
+
+    /** DeviceReset: data size 0 at [5], command class 0x00 at [6], command id 0x0B at [7], XOR of bytes 2..87 at [88].
+     *  Sent with SET_REPORT (feature report 0, interface 3); the Kishi answers RESET_OK and re-enumerates about 1 s later. */
+    static byte[] deviceReset() {
+        byte[] report = new byte[RESET_SIZE];
+        report[5] = 0x00;
+        report[6] = 0x00;
+        report[7] = 0x0B;
+        byte check = 0;
+        for (int i = 2; i < 88; i++) check ^= report[i];
+        report[88] = check;
+        return report;
     }
 }

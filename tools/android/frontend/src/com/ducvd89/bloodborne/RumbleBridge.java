@@ -10,6 +10,8 @@ import android.os.VibrationEffect;
 import android.os.Vibrator;
 import android.os.VibratorManager;
 import android.view.InputDevice;
+import android.view.KeyEvent;
+import android.view.MotionEvent;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileReader;
@@ -66,6 +68,11 @@ final class RumbleBridge {
         if (!foreground) stopTest();
         kishi.setForeground(foreground);
     }
+
+    /** Controller input as MainActivity dispatches it, all of it (also with the drawer open or the game held): the
+     *  Kishi's idle recovery (KishiIdleReset). Main thread. */
+    void input(KeyEvent e) { kishi.input(e); }
+    void input(MotionEvent e) { kishi.input(e); }
 
     boolean testKishi() {
         if (!enabled || !drawer || !kishi.play(170,170)) return false;

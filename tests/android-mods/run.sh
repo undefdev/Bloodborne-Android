@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Host-JDK tests of the app's Java mod/PKG code (ModLoader, ModManager, PkgInstaller, GameCheck, Sfo, MiniJson), FootstepTracks,
-# the Kishi's reports (KishiReports), of RuntimeCleanup
+# the Kishi's reports and idle reset (KishiReports, KishiIdleReset), of RuntimeCleanup
 # (the removal of the former Linux runtime on an update) and the
 # parity check against the Python they replace (tools/android/mods_android.py).
 #   tests/android-mods/run.sh            unit tests, then the parity check
@@ -18,7 +18,7 @@ src=tools/android/frontend/src/com/ducvd89/bloodborne
 "$jdk/bin/javac" --release 8 -Xlint:-options -d "$out/classes" \
     $src/FsUtil.java $src/SafeWrite.java $src/MiniJson.java $src/ModLoader.java $src/ModManager.java $src/Sfo.java \
     $src/GameCheck.java $src/PkgInstaller.java $src/PkgVerifier.java $src/PkgProgress.java $src/RuntimeCleanup.java $src/FootstepTracks.java \
-    $src/KishiReports.java
+    $src/KishiReports.java $src/KishiIdleReset.java
 "$jdk/bin/javac" --release 17 -cp "$out/classes" -d "$out/classes" tests/android-mods/T.java tests/android-mods/ModsTest.java \
     tests/android-mods/ParityCli.java tests/android-mods/CleanupTest.java tests/android-mods/SafeWriteTest.java tests/android-mods/FootstepTracksTest.java \
     tests/android-mods/KishiTest.java

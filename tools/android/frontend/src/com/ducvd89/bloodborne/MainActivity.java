@@ -693,6 +693,7 @@ public final class MainActivity extends Activity {
     }
 
     @Override public boolean dispatchKeyEvent(KeyEvent e) {
+        if (rumble!=null) rumble.input(e); // only watched: the Kishi's idle recovery
         int code=e.getKeyCode();
         if (code==KeyEvent.KEYCODE_BACK || code==KeyEvent.KEYCODE_BUTTON_MODE) {
             if (e.getAction()==KeyEvent.ACTION_UP) onBackPressed(); return true;
@@ -713,6 +714,7 @@ public final class MainActivity extends Activity {
         return super.dispatchKeyEvent(e);
     }
     @Override public boolean dispatchGenericMotionEvent(MotionEvent e) {
+        if (rumble!=null) rumble.input(e);
         if ((drawerOpen || userPaused) && e.isFromSource(android.view.InputDevice.SOURCE_JOYSTICK)) return true;
         return pad.motion(e) || super.dispatchGenericMotionEvent(e);
     }
