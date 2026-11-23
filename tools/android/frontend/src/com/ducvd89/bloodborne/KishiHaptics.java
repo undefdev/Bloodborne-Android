@@ -22,7 +22,14 @@ import android.view.KeyEvent;
 import android.view.MotionEvent;
 
 import java.util.Objects;
+import java.util.Random;
 
+/** The Razer Kishi V3 Pro's HD haptics over USB (interface 4), else RumbleBridge falls back to Android's vibrators.
+ *  Two ways to play, chosen per game start (setTable):
+ *  - The workbench's design (haptics.json, HapticsTable): GameHaptics plays sound rules and the rumble translation on one
+ *    15 ms frame clock (Scheduler), driven from the worker: sound(), rumble(), and play() for the motors.
+ *  - Without it, as before: the motors as 30 ms frames (KishiReports.frame(large, small)) and footsteps from the game
+ *    folder's tracks (FootstepTracks) or the built-in patterns, only while no rumble runs: play() and step(). */
 final class KishiHaptics {
     private static final String TAG = "BloodborneKishi";
     private static final int FRAME_MS = KishiReports.FRAME_MS, SLOTS = KishiReports.SLOTS;
@@ -50,6 +57,8 @@ final class KishiHaptics {
     private boolean requested, attempted, ready, foreground, enabled = true;
     private int wantedLarge, wantedSmall;
     private volatile FootstepTracks tracks;
+    /** The workbench's design, or null (as before). */
+    private volatile HapticsTable table;
     private final KishiIdleReset idle = new KishiIdleReset();
     private final Runnable recheck = this::refresh;
     private final BroadcastReceiver events = new BroadcastReceiver() {
@@ -68,6 +77,16 @@ final class KishiHaptics {
     private boolean leftFoot;
     private final byte[] reply = new byte[64];
     private final Runnable tick = this::sendFrame;
+    // With the workbench's design: its player and frame clock (worker).
+    private GameHaptics game;
+    private Scheduler scheduler;
+    private final Runnable effectTick = this::pollEffects;
+    private final Scheduler.Sink sink = new Scheduler.Sink() {
+        @Override public void frame(byte[] report) {
+            if (connection != null && transfer(report, true)) playing = true;
+        }
+        @Override public void sound(String file, float gain) {} // the game plays its own sounds
+    };
 
     KishiHaptics(Context context, Runnable routeChanged) {
         this.context = context;
@@ -147,6 +166,12 @@ final class KishiHaptics {
             wantedLarge = l;
             wantedSmall = s;
             worker.post(() -> {
+                if (game != null) {
+                    if (connection == null) return;
+                    game.motors(l, s, System.nanoTime());
+                    pollEffects();
+                    return;
+                }
                 large = l;
                 small = s;
                 footstep = null;
@@ -159,6 +184,42 @@ final class KishiHaptics {
 
     /** The game folder's footstep tracks (null: the built-in patterns). */
     void setTracks(FootstepTracks tracks) { this.tracks = tracks; }
+
+    /** The workbench's design for this game start, or null to play as before. Any thread; what plays now stops. */
+    void setTable(HapticsTable table) {
+        this.table = table;
+        if (worker == null) return;
+        worker.post(() -> {
+            stopAll();
+            scheduler = table == null ? null : new Scheduler(sink);
+            game = table == null ? null : new GameHaptics(table, scheduler, new Random());
+            if (game != null) game.prepare(); // at game start, before any event
+        });
+    }
+
+    /** Whether the workbench's design plays (sound() and rumble() rather than step()). */
+    boolean effects() { return table != null; }
+
+    /** A sound of the player character (the event pipe, or the footstep file without it), by the design's rules. Main thread. */
+    void sound(String name) {
+        if (!ready) return;
+        worker.post(() -> {
+            if (game == null || connection == null) return;
+            GameHaptics.Played played = game.sound(name, System.nanoTime());
+            if (played == null) return;
+            pollEffects();
+        });
+    }
+
+    /** A rumble starts or ends (the event pipe): kept also while not ready, for the design's mutes. Any thread. */
+    void rumble(boolean start, int id) {
+        if (worker == null) return;
+        worker.post(() -> {
+            if (game == null) return;
+            game.rumble(start, id, System.nanoTime());
+            if (connection != null) pollEffects();
+        });
+    }
 
     void step(int material, boolean running) {
         if (!ready || wantedLarge != 0 || wantedSmall != 0) return;
@@ -176,9 +237,14 @@ final class KishiHaptics {
         });
     }
 
+    /** Silence: the footstep that plays stops (with the design: every effect and the rumble). */
     void cancelStep() {
         if (!ready) return;
         worker.post(() -> {
+            if (game != null) {
+                stopEffects();
+                return;
+            }
             if (footstep == null) return;
             footstep = null;
             worker.removeCallbacks(tick);
@@ -332,6 +398,14 @@ final class KishiHaptics {
         } else {
             frame = KishiReports.frame(large, small);
         }
+        if (!transfer(frame, active)) return;
+        playing = active;
+        if (active) worker.postAtTime(tick, start + FRAME_MS);
+    }
+
+    /** Sends one report and reads the Kishi's echo. False when it failed: then it is disconnected and Android vibration
+     *  takes over. Worker thread, connected. */
+    private boolean transfer(byte[] frame, boolean active) {
         // usbfs also accepts interrupt endpoints for these bounded transfers.
         int sent = connection.bulkTransfer(out, frame, frame.length, 40);
         boolean answered = sent == frame.length && connection.bulkTransfer(in, reply, reply.length, 25) > 0;
@@ -341,14 +415,45 @@ final class KishiHaptics {
             UsbDevice target = connectedDevice;
             disconnect();
             main.post(() -> { if (worker != null && device == target) setReady(false); });
+            return false;
+        }
+        return true;
+    }
+
+    /** The design's frame clock: what is due now is sent, and the next tick is set. Worker thread. */
+    private void pollEffects() {
+        worker.removeCallbacks(effectTick);
+        if (scheduler == null || connection == null) return;
+        long due = scheduler.poll(System.nanoTime());
+        if (connection == null) return; // a failed transfer disconnected
+        if (due == Long.MAX_VALUE) {
+            playing = false; // the last frame ends by itself
             return;
         }
-        playing = active;
-        if (active) worker.postAtTime(tick, start + FRAME_MS);
+        long wait = due - System.nanoTime();
+        worker.postDelayed(effectTick, wait <= 0 ? 0 : (wait + 999_999) / 1_000_000);
+    }
+
+    /** The design's effects and rumble stop at once; a stop frame ends what the Kishi plays. Worker thread. */
+    private void stopEffects() {
+        worker.removeCallbacks(effectTick);
+        if (game != null) game.silence();
+        if (connection != null && playing) transfer(KishiReports.frame(0, 0), false);
+        playing = false;
+    }
+
+    /** Whatever plays stops (both ways), before the way to play changes. Worker thread. */
+    private void stopAll() {
+        stopEffects();
+        worker.removeCallbacks(tick);
+        footstep = null;
+        large = small = 0;
     }
 
     private void disconnect() {
         worker.removeCallbacks(tick);
+        worker.removeCallbacks(effectTick);
+        if (game != null) game.silence();
         if (connection != null) {
             if (port != null) {
                 if (playing) {

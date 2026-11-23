@@ -2,7 +2,9 @@ package com.ducvd89.bloodborne;
 
 import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 /**
  * Plays playbacks on its own thread on one frame clock: every 15 ms while anything plays, the current frames of all
@@ -12,7 +14,9 @@ import java.util.List;
  * playback's start, so a single effect keeps its exact timing; started while the clock runs, its frames join at the
  * next tick (at most one frame later). Sounds play at their own delays. A tick more than one frame period late is
  * skipped rather than sent in a burst (e.g. after the Kishi link was blocked by a reset).
- * From hapticsBench's player (player/src/hb, d7d60f9), unchanged but for the package; plain Java, tested on the host.
+ * From hapticsBench's player (player/src/hb, d7d60f9), with two additions for the game: a frame held on a channel
+ * (hold: the game's rumble, a continuous tone from the motor values) joins every tick until it is changed or released,
+ * and clear() stops everything at once (the game's pause, the drawer). Plain Java, tested on the host.
  */
 public final class Scheduler implements Runnable {
     public static final long FRAME_NS = Renderer.FRAME_MS * 1_000_000L;
@@ -50,6 +54,8 @@ public final class Scheduler implements Runnable {
 
     private final Sink sink;
     private final List<Active> active = new ArrayList<>();
+    /** channel -> the {left, right} grips held there, sent every tick (layered like a playback). */
+    private final Map<String, FrameEncoder.Grip[]> held = new LinkedHashMap<>();
     private long tickNs = -1; // the next frame tick, -1 while no frames are queued
     private volatile boolean running = true;
 
@@ -68,11 +74,33 @@ public final class Scheduler implements Runnable {
         long startNs = nowNs + lead;
         active.removeIf(a -> a.channel.equals(channel));
         Active a = new Active(channel, startNs, pb);
-        boolean clockRunning = tickNs >= 0 && othersHaveFrames(tickNs, a);
+        boolean clockRunning = tickNs >= 0 && (othersHaveFrames(tickNs, a) || !held.isEmpty());
         active.add(a);
         if (!pb.grips.isEmpty() && !clockRunning) tickNs = startNs;
         notifyAll();
         return startNs;
+    }
+
+    /**
+     * Holds grips ({left, right}, as Renderer.gripsFor's frames) on a channel from the next tick on, every tick, until
+     * the next hold on that channel; null releases it. Started while idle, the clock starts at nowNs.
+     */
+    public synchronized void hold(String channel, FrameEncoder.Grip[] grips, long nowNs) {
+        if (grips == null) {
+            held.remove(channel);
+            return;
+        }
+        boolean clockRunning = tickNs >= 0;
+        held.put(channel, grips);
+        if (!clockRunning) tickNs = nowNs;
+        notifyAll();
+    }
+
+    /** Stops every playback and held frame at once (their sounds too); the next start begins a new clock. */
+    public synchronized void clear() {
+        active.clear();
+        held.clear();
+        tickNs = -1;
     }
 
     private boolean othersHaveFrames(long t, Active except) {
@@ -105,7 +133,11 @@ public final class Scheduler implements Runnable {
                     left.add(g[0]);
                     right.add(g[1]);
                 }
-                tickNs = anyFramesAfter(t) ? t + FRAME_NS : -1;
+                for (FrameEncoder.Grip[] g : held.values()) {
+                    left.add(g[0]);
+                    right.add(g[1]);
+                }
+                tickNs = anyFramesAfter(t) || !held.isEmpty() ? t + FRAME_NS : -1;
                 if (!left.isEmpty() && nowNs - t < FRAME_NS) {
                     frame = left.size() == 1 ? FrameEncoder.encode(Renderer.FRAME_MS, left.get(0), right.get(0))
                         : FrameEncoder.encode(Renderer.FRAME_MS, Renderer.mix(left), Renderer.mix(right));
@@ -129,7 +161,7 @@ public final class Scheduler implements Runnable {
     }
 
     public synchronized boolean idle() {
-        return active.isEmpty();
+        return active.isEmpty() && held.isEmpty();
     }
 
     private synchronized long nextDue() {

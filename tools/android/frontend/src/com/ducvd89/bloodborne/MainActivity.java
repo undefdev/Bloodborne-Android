@@ -2018,7 +2018,10 @@ public final class MainActivity extends Activity {
             File gameLog=new File(BASE,"logs/android-game.log"), previous=new File(BASE,"logs/android-game.prev.log");
             gameLog.getParentFile().mkdirs();
             if (gameLog.length()>0) { previous.delete(); gameLog.renameTo(previous); }
-            rumble.setGame(gameDir==null ? null : new File(gameDir));
+            // The workbench's haptics design (<game folder>/haptics/haptics.json): the runtime sends the player's sounds and the
+            // rumble starts and ends through a FIFO the app reads (BB_EVENT_PIPE). Without it, haptics as before.
+            String eventPipe=rumble.setGame(gameDir==null ? null : new File(gameDir));
+            if (eventPipe!=null) extra.add("BB_EVENT_PIPE="+eventPipe);
             // Haptics event log build: the game appends its sound and rumble events to <game folder>/haptics/events.log
             // (src/runtime_events.c); the previous run's log is kept as events.log.1.
             if (gameDir!=null) extra.add("BB_EVENT_LOG="+eventLog(new File(gameDir)).getPath());
@@ -2038,7 +2041,7 @@ public final class MainActivity extends Activity {
                     String stopLine=null;
                     String line; while ((line=r.readLine())!=null) {
                         out.println(OnlineSettings.scrub(line)); out.flush();
-                        if (line.startsWith("Runtime: event log") || line.startsWith("Runtime: hunter footstep") || line.startsWith("Runtime: rumble")) android.util.Log.i("BloodborneEvents",line);
+                        if (line.startsWith("Runtime: event log") || line.startsWith("Runtime: event pipe") || line.startsWith("Runtime: hunter footstep") || line.startsWith("Runtime: rumble")) android.util.Log.i("BloodborneEvents",line);
                         if (!driverTrouble && driverTrouble(line)) driverTrouble=true;
                         if (line.startsWith("STOP:")) stopLine=line; // the native code's own reason (a miss, a library for another game build)
                     }

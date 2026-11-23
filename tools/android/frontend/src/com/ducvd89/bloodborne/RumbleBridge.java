@@ -19,12 +19,21 @@ import java.util.ArrayList;
 import java.util.List;
 
 /** The game's rumble ("<large> <small>" in bbport's atomic rumble file) -> the pad's motors, else the device's own.
- *  No polling: a FileObserver wakes it when the runtime renames a new file in. */
+ *  No polling: a FileObserver wakes it when the runtime renames a new file in.
+ *  With the game folder's haptics/haptics.json (the workbench's design, HapticsTable), the Kishi plays it (KishiHaptics,
+ *  GameHaptics): the player's sounds and the rumbles' starts and ends come from the runtime's event pipe (EventPipe,
+ *  BB_EVENT_PIPE), the motors from the rumble file. Footsteps from the footstep file then play only while the pipe has
+ *  not said it sends the sounds (its hook S1 installed, or any sound), so none plays twice. */
 final class RumbleBridge {
+    private static final String TAG="BloodborneKishi";
     private static final int ON_THRESHOLD=64; // without amplitude control: on at or above this
+    /** A pipe sound older than this (ms) is not played any more. */
+    private static final long SOUND_MAX_AGE_MS=200;
     private final Context context;
     private final File file, footsteps;
     private final KishiHaptics kishi;
+    private final EventPipe pipe;
+    private boolean pipeSounds; // this game start's sounds come from the pipe (main thread)
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final List<Vibrator> active = new ArrayList<>();
     private FileObserver observer;
@@ -39,6 +48,7 @@ final class RumbleBridge {
         this.file=file;
         footsteps=new File(file.getParentFile(),"android-footstep.state");
         kishi=new KishiHaptics(context,() -> { if (enabled && !drawer && !paused) apply(); });
+        pipe=new EventPipe(new File(context.getFilesDir(),"haptics-events.fifo"),e -> handler.post(() -> event(e)));
     }
 
     /** Starts watching; the file is not read (an old value must not replay). Main thread. */
@@ -60,10 +70,36 @@ final class RumbleBridge {
         if (observer!=null) { observer.stopWatching(); observer=null; }
         enabled=false;
         reset();
+        pipe.close();
         kishi.close();
     }
-    /** The game folder's footstep tracks, if it has them (FootstepTracks). Any thread. */
-    void setGame(File gameDir) { kishi.setTracks(gameDir==null ? null : FootstepTracks.load(gameDir)); }
+    /** At each game start, the game folder's haptics (any thread): its haptics/haptics.json when it is there and valid,
+     *  else, as before, its footstep tracks (FootstepTracks) and the motor rumble; one log line says which. Returns the
+     *  event pipe for BB_EVENT_PIPE when the design plays and the pipe could be made, else null (the runtime then runs
+     *  without it, as before). */
+    String setGame(File gameDir) {
+        HapticsTable table=null;
+        String why="no game folder";
+        if (gameDir!=null) {
+            try { table=HapticsTable.load(gameDir); }
+            catch (HapticsTable.Invalid e) { why=e.getMessage(); }
+        }
+        handler.post(() -> pipeSounds=false);
+        if (table==null) {
+            FootstepTracks tracks=gameDir==null ? null : FootstepTracks.load(gameDir);
+            kishi.setTable(null);
+            kishi.setTracks(tracks);
+            android.util.Log.i(TAG,"Haptics: "+HapticsTable.FILE+" not used ("+why+"): footsteps from "
+                +(tracks!=null ? FootstepTracks.FILE : "the built-in patterns")+", rumble as motor frames");
+            return null;
+        }
+        kishi.setTracks(null);
+        kishi.setTable(table);
+        String path=pipe.open();
+        android.util.Log.i(TAG,"Haptics: "+HapticsTable.FILE+" loaded: "+table.summary()
+            +(path==null ? "; no event pipe: footsteps from the footstep file" : ""));
+        return path;
+    }
     void setForeground(boolean foreground) {
         if (!foreground) stopTest();
         kishi.setForeground(foreground);
@@ -138,9 +174,25 @@ final class RumbleBridge {
             long age=SystemClock.elapsedRealtime()-timestamp;
             if (timestamp<=lastFootstep || age<0 || age>120) return;
             lastFootstep=timestamp;
-            kishi.step(Integer.parseInt(parts[1]),"2001".equals(parts[2]));
+            if (!kishi.effects()) kishi.step(Integer.parseInt(parts[1]),"2001".equals(parts[2]));
+            else if (!pipeSounds) kishi.sound(GameHaptics.footstepSound(Integer.parseInt(parts[1]),Integer.parseInt(parts[2])));
         } catch (java.io.IOException | NumberFormatException e) {
             // A reset may delete a pending event.
+        }
+    }
+
+    /** A line from the event pipe (main thread). Rumble starts and ends always count (the design's mutes); sounds play
+     *  like the footsteps: not with Vibration off, the drawer open or the game held, and not when late. */
+    private void event(HapticEvent e) {
+        switch (e.kind) {
+            case HOOKS: if (e.hook("S1")) pipeSounds=true; break;
+            case RUMBLE_START: case RUMBLE_END: kishi.rumble(e.kind==HapticEvent.Kind.RUMBLE_START,e.id); break;
+            case SOUND:
+                pipeSounds=true;
+                long age=SystemClock.elapsedRealtime()-e.ms;
+                if (!enabled || drawer || paused || age>SOUND_MAX_AGE_MS || age<-SOUND_MAX_AGE_MS) return;
+                kishi.sound(e.text);
+                break;
         }
     }
 
