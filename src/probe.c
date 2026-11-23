@@ -982,7 +982,7 @@ int main(int argc, char **argv) {
         }
     }
 #ifdef __ANDROID__
-    if (supports_footsteps && !cpu_only) runtime_pad_install_footsteps(image,size);
+    if (supports_footsteps && !cpu_only) { runtime_pad_install_footsteps(image,size); runtime_events_install(image,size); }
 #endif
     protect(traps, round_page((import_count + 1) * 32), 5);
     protect(image, round_page(size), 0);

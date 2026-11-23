@@ -766,6 +766,9 @@ void runtime_pad_install_footsteps(unsigned char *image, size_t size) {
 static ABI int32_t pad_vibration(int32_t handle, const uint8_t *param) {
     if (handle!=PAD_HANDLE || !opened) return ERR_INVALID_HANDLE;
     if (!param) return ERR_INVALID_ARG;
+#ifdef __ANDROID__
+    runtime_events_vibration(param[0],param[1]);
+#endif
 #ifndef BB_NO_SDL
     pthread_mutex_lock(&lock);
     SDL_Gamepad *g=current_gamepad();

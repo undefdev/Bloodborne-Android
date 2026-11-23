@@ -1049,6 +1049,16 @@ public final class MainActivity extends Activity {
         if ("aot-build".equals(action) && rebuild!=null) rebuild.showProgress(); // the build's notification
     }
 
+    /** <game>/haptics/events.log, the game's event log (BB_EVENT_LOG): the folder is made, an earlier log renamed to events.log.1. */
+    private static File eventLog(File game) {
+        File dir=new File(game,"haptics"), log=new File(dir,"events.log"), previous=new File(dir,"events.log.1");
+        if (!dir.isDirectory() && !dir.mkdirs()) android.util.Log.w("BloodborneEvents","cannot create "+dir);
+        if (log.exists()) {
+            previous.delete();
+            if (!log.renameTo(previous)) android.util.Log.w("BloodborneEvents","cannot rename "+log+" to "+previous.getName());
+        }
+        return log;
+    }
     /** The game's launch script, run with Android's own shell. extra: NAME=value pairs added to the environment.
      *  The environment is cleared: the script sets what the game process needs (run-bionic.sh). */
     private Process launchScript(String[] extra) throws java.io.IOException {
@@ -2007,6 +2017,9 @@ public final class MainActivity extends Activity {
             gameLog.getParentFile().mkdirs();
             if (gameLog.length()>0) { previous.delete(); gameLog.renameTo(previous); }
             rumble.setGame(gameDir==null ? null : new File(gameDir));
+            // Haptics event log build: the game appends its sound and rumble events to <game folder>/haptics/events.log
+            // (src/runtime_events.c); the previous run's log is kept as events.log.1.
+            if (gameDir!=null) extra.add("BB_EVENT_LOG="+eventLog(new File(gameDir)).getPath());
             final Process launched=launchScript(extra.toArray(new String[0]));
             game=launched;
             synchronized (pauseLock) { gamePid=pidOf(launched); onlineGame=online.launchedOnline(); }
@@ -2023,6 +2036,7 @@ public final class MainActivity extends Activity {
                     String stopLine=null;
                     String line; while ((line=r.readLine())!=null) {
                         out.println(OnlineSettings.scrub(line)); out.flush();
+                        if (line.startsWith("Runtime: event log") || line.startsWith("Runtime: hunter footstep")) android.util.Log.i("BloodborneEvents",line);
                         if (!driverTrouble && driverTrouble(line)) driverTrouble=true;
                         if (line.startsWith("STOP:")) stopLine=line; // the native code's own reason (a miss, a library for another game build)
                     }

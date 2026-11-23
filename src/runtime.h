@@ -233,6 +233,10 @@ uintptr_t runtime_pad_resolve(const char *name);
 void runtime_pad_report(void);
 #ifdef __ANDROID__
 void runtime_pad_install_footsteps(unsigned char *image, size_t size);
+/* Haptics event log (src/runtime_events.c): with BB_EVENT_LOG set, the sound and rumble events of CUSA03173 v1.09
+ * (hook slots, each set only when its site's bytes match) and the pad's vibration bytes are appended to that file. */
+void runtime_events_install(unsigned char *image, size_t size);
+void runtime_events_vibration(unsigned large, unsigned small);
 #endif
 uintptr_t runtime_rtc_resolve(const char *name);
 const char *runtime_file_user_dir(void);

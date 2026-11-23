@@ -1,0 +1,18 @@
+# CUSA03173 v1.09: haptics event log (src/runtime_events.c, active only with BB_EVENT_LOG). Static analysis of the eboot.
+# S1: TAE 128 sound about to play (rax character, ecx final category, ebx final id, r14 params).
+hook 1a26526 4 snap
+# S2: TAE 130 / 10130 voice sound (r13 character, r12d final category, ebx final id, rdi params).
+hook 1a26c68 4 snap
+# The sound system's four "create event" methods (vtable 0x48, 0x50, 0x58, 0x60): rdx = event name.
+hook 27fadde 7 snap
+hook 27fb1e0 7 snap
+hook 27fb6e3 7 snap
+hook 27fca2c 7 snap
+# R1: each queued rumble, per frame ([[rbx+0x30]] id, xmm0 elapsed).
+hook 17e05f6 4 snap
+# R2: TAE 145 global rumble queued (r13d id, [r15+0x10] character).
+hook 1a2582d 3 snap
+# R3: TAE 144 local rumble requested (rdi character, r14 params).
+hook 1a252be 4 snap
+# R4: final motor values (xmm1 heavy, xmm0 light).
+hook f91946 4 snap
