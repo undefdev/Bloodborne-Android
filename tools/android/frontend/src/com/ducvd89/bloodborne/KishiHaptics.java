@@ -22,15 +22,15 @@ import java.util.Objects;
 
 final class KishiHaptics {
     private static final String TAG = "BloodborneKishi";
-    private static final int FRAME_MS = 30, SLOTS = 4; // a frame plays four (amplitude, frequency) slots per grip
+    private static final int FRAME_MS = KishiReports.FRAME_MS, SLOTS = KishiReports.SLOTS;
     private static final int HEEL_FREQ = 10, HEEL_SLOTS = 8, HEEL_PERCENT = 40;
     // Without the game folder's tracks: (amplitude 0-63, frequency) per 7.5 ms slot.
-    private static final int[] STONE = slots(20, 35);
-    private static final int[] WOOD = slots(16, 10, 6, 14);
-    private static final int[] GRAVEL = slots(15, 41, 8, 27);
-    private static final int[] SOFT = slots(11, 11);
-    private static final int[] WATER = slots(14, 28, 0, 0, 9, 41);
-    private static final int[] METAL = slots(17, 45, 7, 37);
+    private static final int[] STONE = KishiReports.slots(20, 35);
+    private static final int[] WOOD = KishiReports.slots(16, 10, 6, 14);
+    private static final int[] GRAVEL = KishiReports.slots(15, 41, 8, 27);
+    private static final int[] SOFT = KishiReports.slots(11, 11);
+    private static final int[] WATER = KishiReports.slots(14, 28, 0, 0, 9, 41);
+    private static final int[] METAL = KishiReports.slots(17, 45, 7, 37);
     private final Context context;
     private final UsbManager usb;
     private final Runnable routeChanged;
@@ -242,10 +242,10 @@ final class KishiHaptics {
                     heel[i * 2 + 1] = HEEL_FREQ;
                 }
             }
-            frame = leftFoot ? frame(step, heel) : frame(heel, step);
+            frame = leftFoot ? KishiReports.frame(step, heel) : KishiReports.frame(heel, step);
             if (footstepSlot * 2 >= footstep.length) footstep = null;
         } else {
-            frame = frame(large, small);
+            frame = KishiReports.frame(large, small);
         }
         // usbfs also accepts interrupt endpoints for these bounded transfers.
         int sent = connection.bulkTransfer(out, frame, frame.length, 40);
@@ -267,7 +267,7 @@ final class KishiHaptics {
         if (connection != null) {
             if (port != null) {
                 if (playing) {
-                    byte[] stop = frame(0, 0);
+                    byte[] stop = KishiReports.frame(0, 0);
                     connection.bulkTransfer(out, stop, stop.length, 40);
                 }
                 connection.releaseInterface(port);
@@ -289,44 +289,5 @@ final class KishiHaptics {
         ready = false;
         worker.post(this::disconnect);
         thread.quitSafely();
-    }
-
-    /** (amplitude, frequency) per frame -> the same per slot. */
-    private static int[] slots(int... perFrame) {
-        int[] out = new int[perFrame.length * SLOTS];
-        for (int i = 0; i < out.length; i += 2) {
-            out[i] = perFrame[i / (SLOTS * 2) * 2];
-            out[i + 1] = perFrame[i / (SLOTS * 2) * 2 + 1];
-        }
-        return out;
-    }
-
-    // Protocol 2.5 stream report, based on Mokomis/rumblebridge (MIT).
-    static byte[] frame(int large, int small) {
-        return frame(slots(large * 63 / 255, 10), slots(small * 63 / 255, 35));
-    }
-
-    /** Left and right grips: SLOTS (amplitude 0-63, frequency 0-127) pairs each. */
-    static byte[] frame(int[] left, int[] right) {
-        byte[] report = {2, 19, 0, 1, 0x0e, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-        putBits(report, 40, FRAME_MS, 7);
-        band(report, 47, left);
-        band(report, 102, right);
-        return report;
-    }
-
-    private static void band(byte[] report, int bit, int[] slots) {
-        putBits(report, bit++, 1, 1);
-        for (int i = 0; i < SLOTS; i++, bit += 13) {
-            int level = slots[i * 2];
-            putBits(report, bit, level, 6);
-            putBits(report, bit + 6, level == 0 ? 0 : slots[i * 2 + 1], 7);
-        }
-    }
-
-    private static void putBits(byte[] report, int bit, int value, int count) {
-        for (int i = count - 1; i >= 0; i--, bit++) {
-            if (((value >> i) & 1) != 0) report[bit / 8] |= 1 << (7 - bit % 8);
-        }
     }
 }

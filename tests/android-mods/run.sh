@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Host-JDK tests of the app's Java mod/PKG code (ModLoader, ModManager, PkgInstaller, GameCheck, Sfo, MiniJson), FootstepTracks, of RuntimeCleanup
+# Host-JDK tests of the app's Java mod/PKG code (ModLoader, ModManager, PkgInstaller, GameCheck, Sfo, MiniJson), FootstepTracks,
+# the Kishi's reports (KishiReports), of RuntimeCleanup
 # (the removal of the former Linux runtime on an update) and the
 # parity check against the Python they replace (tools/android/mods_android.py).
 #   tests/android-mods/run.sh            unit tests, then the parity check
@@ -16,11 +17,14 @@ src=tools/android/frontend/src/com/ducvd89/bloodborne
 # The core classes are plain Java 8, as the frontend's javac --release 8 builds them.
 "$jdk/bin/javac" --release 8 -Xlint:-options -d "$out/classes" \
     $src/FsUtil.java $src/SafeWrite.java $src/MiniJson.java $src/ModLoader.java $src/ModManager.java $src/Sfo.java \
-    $src/GameCheck.java $src/PkgInstaller.java $src/PkgVerifier.java $src/PkgProgress.java $src/RuntimeCleanup.java $src/FootstepTracks.java
+    $src/GameCheck.java $src/PkgInstaller.java $src/PkgVerifier.java $src/PkgProgress.java $src/RuntimeCleanup.java $src/FootstepTracks.java \
+    $src/KishiReports.java
 "$jdk/bin/javac" --release 17 -cp "$out/classes" -d "$out/classes" tests/android-mods/T.java tests/android-mods/ModsTest.java \
-    tests/android-mods/ParityCli.java tests/android-mods/CleanupTest.java tests/android-mods/SafeWriteTest.java tests/android-mods/FootstepTracksTest.java
+    tests/android-mods/ParityCli.java tests/android-mods/CleanupTest.java tests/android-mods/SafeWriteTest.java tests/android-mods/FootstepTracksTest.java \
+    tests/android-mods/KishiTest.java
 "$jdk/bin/java" -cp "$out/classes" com.ducvd89.bloodborne.ModsTest
 "$jdk/bin/java" -cp "$out/classes" com.ducvd89.bloodborne.CleanupTest
 "$jdk/bin/java" -cp "$out/classes" com.ducvd89.bloodborne.SafeWriteTest
 "$jdk/bin/java" -cp "$out/classes" com.ducvd89.bloodborne.FootstepTracksTest
+"$jdk/bin/java" -cp "$out/classes" com.ducvd89.bloodborne.KishiTest
 python3 -I tests/android-mods/parity.py "$jdk/bin/java" "$out/classes"
