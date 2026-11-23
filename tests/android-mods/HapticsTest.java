@@ -374,6 +374,32 @@ final class HapticsTest {
                 "12 R+ x", "12 R* 1", "12 Q 1", "12 S c000001004 extra"}) T.eq(null, HapticEvent.parse(bad), "<" + bad + ">");
         });
 
+        T.test("event route: one reader per FIFO, its lines for the last listener", () -> {
+            EventRoute r = EventRoute.of("/test/route-a.fifo");
+            T.yes(r == EventRoute.of("/test/route-a.fifo"), "one route per path");
+            T.no(r == EventRoute.of("/test/route-b.fifo"), "another path, another route");
+            List<String> first = new ArrayList<>(), second = new ArrayList<>();
+            EventRoute.Listener one = e -> first.add(e.text), two = e -> second.add(e.text);
+            T.yes(r.attach(one), "the first open starts the reader");
+            r.line("10 S c000002001");
+            T.yes(r.attach(two) == false, "a second open (another MainActivity) starts no second reader");
+            for (int i = 0; i < 10; ++i) r.line((20 + i) + " S c000002001");
+            T.eq(1, first.size(), "the old listener gets nothing after the new one attached");
+            T.eq(10, second.size(), "every step goes to the new listener, none is lost");
+            r.detach(one);
+            r.line("40 S c000001001");
+            T.eq(11, second.size(), "detaching the old listener leaves the new one");
+            r.line("bad line");
+            r.line("41 Q 1");
+            T.eq(11, second.size(), "unparsable lines are dropped");
+            r.detach(two);
+            r.line("42 S c000001001");
+            T.eq(11, second.size(), "no listener: dropped");
+            T.yes(r.attach(one) == false, "the reader still runs");
+            r.readerEnded();
+            T.yes(r.attach(two), "after the reader ended, the next open starts one again");
+        });
+
         String export = System.getenv("BB_TEST_HAPTICS");
         T.test("a real export: loads, and every rule plays padded reports", () -> {
             if (export == null || export.isEmpty()) T.skip("set BB_TEST_HAPTICS to a haptics.json export");
